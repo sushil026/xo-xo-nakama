@@ -4,6 +4,7 @@ import HomeScreen from "./features/home/HomeScreen";
 import ModesScreen from "./features/modes/ModesScreen";
 import MatchmakingScreen from "./features/matchmaking/MatchmakingScreen";
 import LocalGameScreen from "./features/game/LocalGame";
+import OnlineGameScreen from "./features/game/OnlineGameScreen";
 
 type Screen =
   | "landing"
@@ -31,15 +32,17 @@ export default function App() {
 
   useEffect(() => {
     if (DEBUG_FORCE_OFFLINE) return;
-    const goOnline = () => setIsOffline(false);
+    const goOnline  = () => setIsOffline(false);
     const goOffline = () => setIsOffline(true);
-    window.addEventListener("online", goOnline);
+    window.addEventListener("online",  goOnline);
     window.addEventListener("offline", goOffline);
     return () => {
-      window.removeEventListener("online", goOnline);
+      window.removeEventListener("online",  goOnline);
       window.removeEventListener("offline", goOffline);
     };
   }, []);
+
+  // ── Screen routing ──────────────────────────────────────────────────────────
 
   if (screen === "landing") {
     return (
@@ -91,36 +94,31 @@ export default function App() {
   if (screen === "local-game") {
     return (
       <LocalGameScreen
-        onBack={() => setScreen(screen === "local-game" ? "modes" : "modes")}
+        onBack={() => setScreen("modes")}
       />
     );
   }
 
+  // ── Online game ─────────────────────────────────────────────────────────────
+  // matchState is always set by MatchmakingScreen before we arrive here,
+  // but we guard defensively in case of a stale navigation.
   if (screen === "game" && matchState) {
     return (
-      <div className="screen">
-        <div style={{ padding: "var(--pad)" }}>
-          <h1 className="t-head-lg">Game</h1>
-          <p className="t-body" style={{ marginTop: 8 }}>
-            Match ID: <code>{matchState.matchId}</code>
-          </p>
-          <p className="t-body" style={{ marginTop: 4 }}>
-            Opponent: <strong>{matchState.opponentName}</strong>
-          </p>
-          <p className="t-body" style={{ marginTop: 4 }}>
-            You play as: <strong>{matchState.iAmX ? "X" : "O"}</strong>
-          </p>
-          <button
-            className="btn btn-ghost btn-full"
-            style={{ marginTop: 24 }}
-            onClick={() => setScreen("modes")}
-            type="button"
-          >
-            ← Back to modes
-          </button>
-        </div>
-      </div>
+      <OnlineGameScreen
+        matchId={matchState.matchId}
+        opponentName={matchState.opponentName}
+        iAmX={matchState.iAmX}
+        onBack={() => {
+          setMatchState(null);
+          setScreen("modes");
+        }}
+      />
     );
+  }
+
+  // Fallback: stale "game" route with no match state → bounce to modes
+  if (screen === "game" && !matchState) {
+    setScreen("modes");
   }
 
   return null;

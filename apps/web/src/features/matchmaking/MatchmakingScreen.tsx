@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { connect, getSocket } from "../../services/nakamaClient";
+import { connect, disconnect, getSocket } from "../../services/nakamaClient";
+import MatchmakingLoader from "./MatchmakingLoader";
 
+// "connected" is an internal UI-only phase: socket is ready but we hold briefly
+// before entering the queue, so the user sees it transition rather than snap.
 type Phase =
   | "connecting"
+  | "connected"
   | "searching"
   | "found"
   | "joining"
@@ -13,7 +17,7 @@ interface MatchInfo {
   matchId: string;
   opponentName: string;
   opponentId: string;
-  iAmCreator: boolean; // true = I was first in the pair (play as X)
+  iAmCreator: boolean;
 }
 
 interface Props {
@@ -21,83 +25,113 @@ interface Props {
   onCancel: () => void;
 }
 
+const CONNECTED_LINGER_MS = 2200; // After socket opens, wait before joining queue
+const FOUND_LINGER_MS = 3000; // After opponent detected, wait before joinMatch
+
+//  Logging helpers
+const ts = () => new Date().toISOString().slice(11, 19);
+const log = {
+  info: (m: string, d?: unknown) =>
+    console.log(`%c[MM ${ts()}] ${m}`, "color:#22c55e", d ?? ""),
+  warn: (m: string, d?: unknown) =>
+    console.warn(`%c[MM ${ts()}] ${m}`, "color:#f59e0b", d ?? ""),
+  error: (m: string, d?: unknown) =>
+    console.error(`%c[MM ${ts()}] ${m}`, "color:#ef4444", d ?? ""),
+};
+
+//  Formats search duration for the opponent card
+const fmtDuration = (ms: number) =>
+  ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+
 export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
   const [phase, setPhase] = useState<Phase>("connecting");
   const [elapsed, setElapsed] = useState(0);
-  const [latency, setLatency] = useState(24);
-  const [searching, setSearching] = useState(24);
   const [matchInfo, setMatchInfo] = useState<MatchInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [searchDurationMs, setSearchDurationMs] = useState<number | null>(null);
 
-  // Keep a ref to the matchmaker ticket so we can cancel it
+  // Refs so async callbacks always read fresh values without stale closures
   const ticketRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
+  const joinedRef = useRef(false);
 
-  // Elapsed timer
+  // Timestamp when searching phase began — to measure how long it took to find
+  const searchStartRef = useRef<number>(0);
+  // Track the current phase in a ref so async callbacks always read latest
+  const phaseRef = useRef<Phase>("connecting");
+
+  //  Global elapsed timer
   useEffect(() => {
-    const t = setInterval(() => {
-      if (cancelledRef.current) return;
-      setElapsed((e) => e + 1);
-      // Jitter latency & searching count for the HUD feel
-      setLatency(18 + Math.floor(Math.random() * 14));
-      setSearching(22 + Math.floor(Math.random() * 6));
+    const id = setInterval(() => {
+      if (!cancelledRef.current) setElapsed((e) => e + 1);
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(id);
   }, []);
 
-  // Main matchmaking flow
+  //  Phase transition helper
+  const transition = (next: Phase) => {
+    phaseRef.current = next;
+    setPhase(next);
+  };
+
+  //  Main matchmaking flow
   useEffect(() => {
-    let socket: ReturnType<typeof getSocket> | null = null;
+    cancelledRef.current = false;
+    joinedRef.current = false;
+    ticketRef.current = null;
+    phaseRef.current = "connecting";
+    searchStartRef.current = 0;
+
+    setPhase("connecting");
+    setSearchDurationMs(null);
+    setElapsed(0);
+    setMatchInfo(null);
+
+    let alive = true;
+    const id = Math.random().toString(36).slice(2, 6).toUpperCase();
+    log.info(`[${id}] start`);
 
     const run = async () => {
       try {
-        // 1. Connect (idempotent — reuses existing session if already connected)
-        setPhase("connecting");
+        //  1. Connect
         const result = await connect();
-        socket = result.socket as ReturnType<typeof getSocket>;
+        if (!alive) return;
 
-        if (cancelledRef.current) return;
+        //  2. Linger on "connected" so the user sees the state
+        transition("connected");
+        await new Promise<void>((res) => setTimeout(res, CONNECTED_LINGER_MS));
+        if (!alive) return;
 
-        // 2. Add to matchmaker pool
-        // min/max count = 2 means "pair me with exactly 1 other player"
-        setPhase("searching");
-        const ticket = await socket.addMatchmaker("*", 2, 2, {
-          // Optional: pass skill/rating properties here for skill-based matching
-          // "properties.rating": currentRating,
-        });
+        //  3. Enter matchmaking queue
+        searchStartRef.current = Date.now();
+        transition("searching");
 
-        ticketRef.current = ticket.ticket;
+        result.socket.onmatchmakermatched = async (matched) => {
+          if (!alive || joinedRef.current) return;
+          joinedRef.current = true;
 
-        // 3. Listen for the match event
-        socket.onmatchmakermatched = async (matched) => {
-          if (cancelledRef.current) return;
+          //  4. Opponent found — record how long search took, linger
+          const dur = Date.now() - searchStartRef.current;
+          setSearchDurationMs(dur);
+          transition("found");
+          log.info(`[${id}] match found in ${dur}ms`);
 
-          setPhase("found");
+          const myId =
+            matched.self?.presence?.user_id ?? result.session.user_id!;
 
-          // Determine which user is "us" and which is the opponent
-          const myUserId = result.session.user_id!;
-
-          const me = matched.users.find((u) => u.presence.user_id === myUserId);
           const opponent = matched.users.find(
-            (u) => u.presence.user_id !== myUserId,
+            (u) => u.presence.user_id !== myId,
           );
 
-          if (!me || !opponent) {
-            setError("Matched users missing — try again.");
-            setPhase("error");
+          if (!opponent) {
+            transition("error");
             return;
           }
 
-          // Nakama doesn't expose display_name in matchmakerUser by default —
-          // it surfaces the username from the presence. Fall back gracefully.
           const opponentName =
             opponent.presence.username ??
-            `Player_${opponent.presence.user_id.slice(0, 4).toUpperCase()}`;
+            `P_${opponent.presence.user_id.slice(0, 4)}`;
 
-          // The "creator" is simply the user with the lexicographically smaller
-          // user_id — a stable, deterministic rule both clients agree on without
-          // a server round-trip. Creator plays as X.
-          const iAmCreator = myUserId < opponent.presence.user_id;
+          const iAmCreator = myId < opponent.presence.user_id;
 
           setMatchInfo({
             matchId: matched.match_id,
@@ -106,752 +140,493 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
             iAmCreator,
           });
 
-          // 4. Join the authoritative match
-          setPhase("joining");
-          if (!socket) {
-            setError("Socket disconnected");
-            setPhase("error");
-            return;
-          }
-          await socket.joinMatch(matched.match_id);
+          // Hold on "found" so the user can see the opponent card appear
+          await new Promise<void>((res) => setTimeout(res, FOUND_LINGER_MS));
+          if (!alive) return;
 
-          if (cancelledRef.current) {
-            if (socket) {
-              await socket.leaveMatch(matched.match_id);
-            }
-            return;
-          }
+          //  5. Join match
+          transition("joining");
 
-          setPhase("ready");
+          const match = await result.socket.joinMatch(matched.match_id);
+          if (!alive) return;
 
-          // Brief pause so the "Found!" UI is visible before transitioning
+          setMatchInfo({
+            matchId: match.match_id,
+            opponentName,
+            opponentId: opponent.presence.user_id,
+            iAmCreator,
+          });
+
+          //  6. Ready
+          transition("ready");
+
           setTimeout(() => {
-            if (!cancelledRef.current) {
-              onMatchFound(matched.match_id, opponentName, iAmCreator);
-            }
-          }, 1200);
+            onMatchFound(match.match_id, opponentName, iAmCreator);
+          }, 500);
         };
-      } catch (err: unknown) {
-        if (cancelledRef.current) return;
-        const msg = err instanceof Error ? err.message : "Connection failed";
-        setError(msg);
-        setPhase("error");
+
+        const ticket = await result.socket.addMatchmaker("*", 2, 2);
+        if (!alive) return;
+
+        ticketRef.current = ticket.ticket;
+      } catch (e) {
+        if (!alive) return;
+        log.error(`[${id}] error`, e);
+        transition("error");
       }
     };
 
     run();
 
-    // Cleanup: remove from matchmaker pool if the user cancels or unmounts
     return () => {
+      alive = false;
       cancelledRef.current = true;
-      if (ticketRef.current) {
-        try {
-          getSocket().removeMatchmaker(ticketRef.current);
-        } catch {
-          // Socket may already be gone — safe to ignore
-        }
-        ticketRef.current = null;
-      }
-    };
-  }, [onMatchFound]);
 
-  const handleCancel = async () => {
-    cancelledRef.current = true;
-    if (ticketRef.current) {
+      const ticket = ticketRef.current;
+      ticketRef.current = null;
+
+      if (ticket && !joinedRef.current) {
+        try {
+          getSocket().removeMatchmaker(ticket);
+        } catch {
+          // ignore
+        }
+      }
+
       try {
-        getSocket().removeMatchmaker(ticketRef.current);
+        getSocket().onmatchmakermatched = () => {};
       } catch {
         // ignore
       }
-      ticketRef.current = null;
+
+      if (!joinedRef.current) disconnect();
+    };
+  }, [onMatchFound]);
+
+  //  Cancel
+  const handleCancel = () => {
+    cancelledRef.current = true;
+    joinedRef.current = true;
+
+    const ticket = ticketRef.current;
+    ticketRef.current = null;
+
+    if (ticket) {
+      try {
+        getSocket().removeMatchmaker(ticket);
+      } catch {
+        // ignore
+      }
     }
+
+    try {
+      getSocket().onmatchmakermatched = () => {};
+    } catch {
+      // ignore
+    }
+
+    disconnect();
     onCancel();
   };
 
-  // ── Helpers ──────────────────────────────────────────────────────────
-
-  const fmtElapsed = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m}:${sec < 10 ? "0" : ""}${sec}`;
-  };
-
-  const stepDone = (p: Phase) =>
-    ["searching", "found", "joining", "ready"].includes(phase) ||
-    (phase === "error" && p === "connecting");
-
-  const stepLive = (p: Phase) => phase === p;
-
-  // ── Render ────────────────────────────────────────────────────────────
-
-  return (
-    <div className="screen" role="main">
-      {/* BG glyphs */}
-      <span
-        className="bg-glyph"
-        style={{ fontSize: 180, right: -20, top: 40 }}
-        aria-hidden
-      >
-        X
-      </span>
-      <span
-        className="bg-glyph"
-        style={{ fontSize: 140, left: -10, bottom: 100 }}
-        aria-hidden
-      >
-        O
-      </span>
-
-      {/* TOPBAR */}
-      <header className="topbar">
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={handleCancel}
-          type="button"
-        >
-          ← Back
-        </button>
-        <span className="coord">GLOBAL QUEUE</span>
-        <span className="coord" style={{ color: "var(--coral)" }}>
-          MM_4F91BC
-        </span>
-      </header>
-
-      {/* Status strip */}
-      <div
-        style={{
-          background: "var(--surface-lo)",
-          borderBottom: "1px solid var(--rim)",
-          padding: "6px var(--pad)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <span className="lbl" style={{ color: "var(--coral)" }}>
-          STATUS //{" "}
-          {phase === "error"
-            ? "ERROR"
-            : phase === "ready"
-              ? "MATCH_FOUND"
-              : "ACTIVE_ENGAGEMENT"}
-        </span>
-        <span className="coord">SEC_03 // 99.2</span>
-      </div>
-
-      {/* Main body */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "24px var(--pad)",
-          position: "relative",
-          zIndex: 1,
-        }}
-      >
-        {/* ── TACTICAL SQUARE LOADER ── */}
-        <TacLoader phase={phase} />
-
-        {/* Title */}
-        {phase !== "found" && phase !== "ready" && (
-          <>
-            <h2
-              style={{
-                fontFamily: "var(--font-head)",
-                fontSize: 24,
-                fontWeight: 800,
-                textTransform: "uppercase",
-                letterSpacing: -0.5,
-                textAlign: "center",
-                marginTop: 24,
-                color: phase === "error" ? "var(--muted)" : "var(--text)",
-              }}
-            >
-              {phase === "connecting" && (
-                <>
-                  Connecting
-                  <Blink />
-                </>
-              )}
-              {phase === "searching" && (
-                <>
-                  Finding opponent
-                  <Blink />
-                </>
-              )}
-              {phase === "joining" && (
-                <>
-                  Joining match
-                  <Blink />
-                </>
-              )}
-              {phase === "error" && "Connection failed"}
-            </h2>
-            {phase === "error" && error && (
-              <p
-                style={{
-                  fontSize: 12,
-                  color: "var(--muted)",
-                  marginTop: 8,
-                  textAlign: "center",
-                }}
-              >
-                {error}
-              </p>
-            )}
-            {phase !== "error" && (
-              <p
-                style={{
-                  fontSize: 11,
-                  color: "var(--muted)",
-                  textAlign: "center",
-                  marginTop: 6,
-                }}
-              >
-                Elapsed:{" "}
-                <span
-                  style={{
-                    color: "var(--soft)",
-                    fontFamily: "var(--font-head)",
-                  }}
-                >
-                  {fmtElapsed(elapsed)}
-                </span>
-              </p>
-            )}
-          </>
-        )}
-
-        {/* ── MATCH FOUND card ── */}
-        {(phase === "found" || phase === "ready") && matchInfo && (
-          <MatchFoundCard info={matchInfo} />
-        )}
-
-        {/* HUD stats */}
-        {(phase === "searching" || phase === "found") && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1px 1fr 1px 1fr",
-              background: "var(--surface)",
-              border: "1px solid var(--rim)",
-              marginTop: 16,
-              width: "100%",
-            }}
-          >
-            <HudStat
-              label="Latency"
-              value={`${latency}ms`}
-              color="var(--teal)"
-            />
-            <div style={{ background: "var(--rim)" }} />
-            <HudStat
-              label="Searching"
-              value={String(searching)}
-              color="var(--coral)"
-            />
-            <div style={{ background: "var(--rim)" }} />
-            <HudStat label="Avg wait" value="~8s" color="var(--amber)" />
-          </div>
-        )}
-
-        {/* Step indicators */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 5,
-            marginTop: 14,
-            width: "100%",
-          }}
-        >
-          <Step
-            done={stepDone("connecting")}
-            live={stepLive("connecting")}
-            title="Connected"
-            sub="server.xo.game · 24ms"
-          />
-          <Step
-            done={phase === "found" || phase === "joining" || phase === "ready"}
-            live={stepLive("searching")}
-            title="In queue"
-            sub="Searching for match..."
-          />
-          <Step
-            done={phase === "ready"}
-            live={phase === "found" || phase === "joining"}
-            title="Opponent found"
-            sub={matchInfo ? `vs ${matchInfo.opponentName}` : "Pending..."}
-          />
-        </div>
-
-        {/* Error retry */}
-        {phase === "error" && (
-          <button
-            className="btn btn-primary btn-full"
-            style={{ marginTop: 16 }}
-            onClick={() => {
-              cancelledRef.current = false;
-              setPhase("connecting");
-              setElapsed(0);
-            }}
-            type="button"
-          >
-            ↻ Retry
-          </button>
-        )}
-      </div>
-
-      {/* Cancel */}
-      <div style={{ padding: "0 var(--pad) 24px" }}>
-        <button
-          className="btn btn-danger btn-full"
-          onClick={handleCancel}
-          type="button"
-        >
-          Cancel search
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── Sub-components ─────────────────────────────────────────────────────
-
-function Blink() {
-  return <span className="blink">...</span>;
-}
-
-function HudStat({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string;
-  color: string;
-}) {
-  return (
-    <div style={{ padding: "10px 8px", textAlign: "center" }}>
-      <div
-        style={{
-          fontFamily: "var(--font-head)",
-          fontSize: 20,
-          fontWeight: 800,
-          lineHeight: 1,
-          color,
-        }}
-      >
-        {value}
-      </div>
-      <div className="lbl" style={{ fontSize: 8, marginTop: 2 }}>
-        {label}
-      </div>
-    </div>
-  );
-}
-
-function Step({
-  done,
-  live,
-  title,
-  sub,
-}: {
-  done: boolean;
-  live: boolean;
-  title: string;
-  sub: string;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "9px 13px",
-        background: "var(--surface)",
-        border: `1px solid ${done ? "rgba(78,205,196,0.3)" : live ? "rgba(255,85,64,0.3)" : "var(--rim)"}`,
-        opacity: !done && !live ? 0.4 : 1,
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "var(--font-head)",
-          fontSize: 12,
-          fontWeight: 700,
-          width: 16,
-          flexShrink: 0,
-          color: done ? "var(--teal)" : live ? "var(--coral)" : "var(--muted)",
-        }}
-        className={live ? "blink" : ""}
-      >
-        {done ? "✓" : live ? "◉" : "○"}
-      </span>
-      <div>
-        <div
-          style={{
-            fontFamily: "var(--font-head)",
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: 1.5,
-            textTransform: "uppercase",
-            color: done
-              ? "var(--teal)"
-              : live
-                ? "var(--coral)"
-                : "var(--muted)",
-          }}
-        >
-          {title}
-        </div>
-        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>
-          {sub}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MatchFoundCard({ info }: { info: MatchInfo }) {
-  return (
-    <div style={{ width: "100%", marginTop: 20, textAlign: "center" }}>
-      <div className="lbl" style={{ marginBottom: 12, color: "var(--teal)" }}>
-        ✓ OPPONENT FOUND
-      </div>
-
-      {/* VS row */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr auto 1fr",
-          gap: 12,
-          alignItems: "center",
-          background: "var(--surface)",
-          border: "1px solid var(--rim)",
-          padding: "14px 16px",
-        }}
-      >
-        {/* You */}
-        <div style={{ textAlign: "left" }}>
-          <div className="lbl" style={{ marginBottom: 4 }}>
-            You
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-head)",
-              fontSize: 18,
-              fontWeight: 800,
-              color: info.iAmCreator ? "var(--coral)" : "var(--amber)",
-              textTransform: "uppercase",
-            }}
-          >
-            {localStorage.getItem("xo_username") ?? "YOU"}
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-head)",
-              fontSize: 11,
-              fontWeight: 700,
-              color: info.iAmCreator ? "var(--coral)" : "var(--amber)",
-              letterSpacing: 1,
-              marginTop: 4,
-            }}
-          >
-            plays {info.iAmCreator ? "X" : "O"}
-          </div>
-        </div>
-
-        {/* VS glyph */}
-        <div
-          style={{
-            fontFamily: "var(--font-head)",
-            fontSize: 22,
-            fontWeight: 800,
-            color: "var(--muted)",
-            letterSpacing: -1,
-          }}
-        >
-          VS
-        </div>
-
-        {/* Opponent */}
-        <div style={{ textAlign: "right" }}>
-          <div className="lbl" style={{ marginBottom: 4, textAlign: "right" }}>
-            Opponent
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-head)",
-              fontSize: 18,
-              fontWeight: 800,
-              color: info.iAmCreator ? "var(--amber)" : "var(--coral)",
-              textTransform: "uppercase",
-            }}
-          >
-            {info.opponentName}
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-head)",
-              fontSize: 11,
-              fontWeight: 700,
-              color: info.iAmCreator ? "var(--amber)" : "var(--coral)",
-              letterSpacing: 1,
-              marginTop: 4,
-            }}
-          >
-            plays {info.iAmCreator ? "O" : "X"}
-          </div>
-        </div>
-      </div>
-
-      <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-        Joining match<span className="blink">...</span>
-      </p>
-    </div>
-  );
-}
-
-// ── Tactical square loader ──────────────────────────────────────────────
-
-function TacLoader({ phase }: { phase: Phase }) {
+  //  Derived state
+  const isSearching = phase === "searching" || phase === "joining";
   const isFound = phase === "found" || phase === "ready";
+  const isError = phase === "error";
 
   return (
-    <div style={{ position: "relative", width: 160, height: 160 }}>
-      {/* Rotating dashed outer ring */}
-      <div
-        style={{
-          position: "absolute",
-          inset: -8,
-          border: "1px dashed rgba(255,85,64,0.18)",
-          animation: "tacRing 10s linear infinite",
-        }}
-      />
+    <>
+      <style>{`
+        @keyframes mmScreenFadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes mmGridPulse {
+          0%, 100% { opacity: 0.04; }
+          50%       { opacity: 0.075; }
+        }
+        @keyframes mmBarLoop {
+          0%   { transform: scaleX(0) translateX(0); }
+          40%  { transform: scaleX(0.6) translateX(0); }
+          60%  { transform: scaleX(0.6) translateX(100%); }
+          100% { transform: scaleX(0) translateX(200%); }
+        }
+        @keyframes mmOpponentIn {
+          from { opacity: 0; transform: translateY(10px) scale(0.94); }
+          to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes mmFadeSlideIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
 
-      {/* Main frame */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          border: `1px solid ${isFound ? "rgba(78,205,196,0.4)" : "rgba(255,85,64,0.2)"}`,
-          transition: "border-color 300ms",
-        }}
-      />
+        .mm-screen {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          min-height: 100dvh;
+          background: #0a0a0f;
+          color: #e8e8f0;
+          font-family: 'Inter', 'SF Pro Display', system-ui, sans-serif;
+          overflow: hidden;
+          animation: mmScreenFadeIn 0.3s ease-out;
+        }
 
-      {/* Corner brackets — drawn with inline SVG */}
-      {(["tl", "tr", "bl", "br"] as const).map((pos) => (
-        <CornerBracket
-          key={pos}
-          pos={pos}
-          color={isFound ? "var(--teal)" : "var(--coral)"}
-        />
-      ))}
+        .mm-bg-gradient {
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          transition: background 0.8s ease;
+        }
+        .mm-bg-searching {
+          background:
+            radial-gradient(ellipse 80% 60% at 20% 80%, rgba(249,115,22,0.07) 0%, transparent 60%),
+            radial-gradient(ellipse 60% 50% at 80% 20%, rgba(20,184,166,0.05) 0%, transparent 55%);
+        }
+        .mm-bg-found {
+          background:
+            radial-gradient(ellipse 80% 60% at 20% 80%, rgba(20,184,166,0.08) 0%, transparent 60%),
+            radial-gradient(ellipse 60% 50% at 80% 20%, rgba(20,184,166,0.06) 0%, transparent 55%);
+        }
+        .mm-bg-error {
+          background:
+            radial-gradient(ellipse 80% 60% at 50% 80%, rgba(239,68,68,0.07) 0%, transparent 60%);
+        }
 
-      {/* Blinking corner pips */}
-      {[
-        { top: 8, left: 8, delay: "0s" },
-        { top: 8, right: 8, delay: "0.3s" },
-        { bottom: 8, left: 8, delay: "0.15s" },
-        { bottom: 8, right: 8, delay: "0.45s" },
-      ].map((style, i) => (
+        .mm-grid {
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background-image:
+            linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+          background-size: 44px 44px;
+          animation: mmGridPulse 4s ease-in-out infinite;
+        }
+
+        /*  Topbar  */
+        .mm-topbar {
+          position: relative;
+          z-index: 2;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 20px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .mm-back-btn {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          background: transparent;
+          border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 8px;
+          color: rgba(255,255,255,0.55);
+          font-size: 13px;
+          font-weight: 500;
+          padding: 7px 12px;
+          cursor: pointer;
+          transition: border-color 0.15s, color 0.15s;
+          letter-spacing: 0.01em;
+        }
+        .mm-back-btn:hover {
+          border-color: rgba(255,255,255,0.22);
+          color: rgba(255,255,255,0.8);
+        }
+        .mm-badge {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+        .mm-badge-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          transition: background 0.4s, box-shadow 0.4s;
+        }
+        .mm-badge-dot-queue  { background: #f97316; box-shadow: 0 0 0 2px rgba(249,115,22,0.28); }
+        .mm-badge-dot-found  { background: #14b8a6; box-shadow: 0 0 0 2px rgba(20,184,166,0.28); }
+        .mm-badge-dot-error  { background: #ef4444; }
+        .mm-region {
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: rgba(255,255,255,0.22);
+        }
+
+        /*  Body  */
+        .mm-body {
+          position: relative;
+          z-index: 1;
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 0 24px 24px;
+        }
+
+        .mm-title {
+          margin-top: 26px;
+          font-size: 22px;
+          font-weight: 700;
+          letter-spacing: -0.02em;
+          color: #f0f0f8;
+          text-align: center;
+          transition: color 0.3s;
+        }
+        .mm-title-error { color: #ef4444; }
+        .mm-subtitle {
+          margin-top: 8px;
+          font-size: 14px;
+          color: rgba(255,255,255,0.36);
+          text-align: center;
+          letter-spacing: 0.01em;
+          min-height: 22px;
+        }
+
+        /*  Scan bar  */
+        .mm-scan-track {
+          margin-top: 28px;
+          width: 100%;
+          max-width: 220px;
+          height: 2px;
+          background: rgba(255,255,255,0.07);
+          border-radius: 2px;
+          overflow: hidden;
+        }
+        .mm-scan-bar {
+          height: 100%;
+          width: 40%;
+          transform-origin: left;
+          animation: mmBarLoop 1.8s ease-in-out infinite;
+          transition: background 0.4s;
+        }
+
+        /*  Opponent card  */
+        .mm-opponent-card {
+          margin-top: 24px;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          background: rgba(20,184,166,0.08);
+          border: 1px solid rgba(20,184,166,0.22);
+          border-radius: 14px;
+          padding: 14px 18px;
+          animation: mmOpponentIn 0.38s cubic-bezier(0.34,1.56,0.64,1);
+          min-width: 218px;
+        }
+        .mm-avatar {
+          width: 38px;
+          height: 38px;
+          border-radius: 10px;
+          background: rgba(20,184,166,0.18);
+          border: 1px solid rgba(20,184,166,0.3);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 15px;
+          font-weight: 700;
+          color: #14b8a6;
+          text-transform: uppercase;
+          flex-shrink: 0;
+        }
+        .mm-opp-name  { font-size: 15px; font-weight: 600; color: #e8e8f0; letter-spacing: -0.01em; }
+        .mm-opp-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #14b8a6; margin-top: 3px; }
+        .mm-opp-side  { font-size: 11px; font-weight: 500; color: rgba(255,255,255,0.3); margin-top: 2px; }
+
+        /*  Error hint  */
+        .mm-error-hint {
+          margin-top: 14px;
+          font-size: 13px;
+          color: rgba(255,255,255,0.28);
+          text-align: center;
+          max-width: 240px;
+          line-height: 1.55;
+          animation: mmFadeSlideIn 0.3s ease-out;
+        }
+
+        /*  Footer  */
+        .mm-footer {
+          position: relative;
+          z-index: 2;
+          padding: 0 20px 36px;
+        }
+        .mm-cancel-btn {
+          width: 100%;
+          padding: 14px;
+          border-radius: 12px;
+          font-size: 15px;
+          font-weight: 600;
+          letter-spacing: 0.01em;
+          cursor: pointer;
+          border: none;
+          transition: background 0.2s, color 0.2s, transform 0.1s;
+        }
+        .mm-cancel-btn:active { transform: scale(0.98); }
+        .mm-btn-queue {
+          background: rgba(255,255,255,0.055);
+          color: rgba(255,255,255,0.45);
+          border: 1px solid rgba(255,255,255,0.08);
+        }
+        .mm-btn-queue:hover {
+          background: rgba(255,255,255,0.09);
+          color: rgba(255,255,255,0.65);
+        }
+        .mm-btn-error {
+          background: rgba(249,115,22,0.12);
+          color: #f97316;
+          border: 1px solid rgba(249,115,22,0.2);
+        }
+        .mm-btn-error:hover { background: rgba(249,115,22,0.18); }
+
+        .mm-opp-found-time {
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.07em;
+          text-transform: uppercase;
+          color: rgba(20,184,166,0.65);
+          margin-top: 5px;
+        }
+      `}</style>
+
+      <div className="mm-screen">
+        {/* Background */}
         <div
-          key={i}
-          style={{
-            position: "absolute",
-            width: 3,
-            height: 3,
-            background: isFound ? "var(--teal)" : "var(--coral)",
-            animation: `blink 0.6s steps(1) ${style.delay} infinite`,
-            ...style,
-          }}
+          className={`mm-bg-gradient ${
+            isError
+              ? "mm-bg-error"
+              : isFound
+                ? "mm-bg-found"
+                : "mm-bg-searching"
+          }`}
         />
-      ))}
+        <div className="mm-grid" />
 
-      {/* Outer tick marks */}
-      <div
-        style={{
-          position: "absolute",
-          height: 1,
-          width: 18,
-          background: "rgba(255,85,64,0.35)",
-          top: "50%",
-          left: -24,
-          transform: "translateY(-50%)",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          height: 1,
-          width: 18,
-          background: "rgba(255,85,64,0.35)",
-          top: "50%",
-          right: -24,
-          transform: "translateY(-50%)",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          width: 1,
-          height: 18,
-          background: "rgba(255,85,64,0.35)",
-          left: "50%",
-          top: -24,
-          transform: "translateX(-50%)",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          width: 1,
-          height: 18,
-          background: "rgba(255,85,64,0.35)",
-          left: "50%",
-          bottom: -24,
-          transform: "translateX(-50%)",
-        }}
-      />
+        {/*  Topbar  */}
+        <header className="mm-topbar">
+          <button className="mm-back-btn" onClick={handleCancel}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path
+                d="M9 2L4 7L9 12"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Back
+          </button>
 
-      {/* Crosshair */}
-      <div
-        style={{
-          position: "absolute",
-          left: "20%",
-          right: "20%",
-          height: 1,
-          top: "50%",
-          background: "rgba(255,85,64,0.12)",
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          top: "20%",
-          bottom: "20%",
-          width: 1,
-          left: "50%",
-          background: "rgba(255,85,64,0.12)",
-        }}
-      />
-
-      {/* Scanning line (hidden when found) */}
-      {!isFound && (
-        <div
-          style={{
-            position: "absolute",
-            left: 2,
-            right: 2,
-            height: 1,
-            background:
-              "linear-gradient(90deg,transparent,var(--coral) 50%,transparent)",
-            animation: "tacScan 2s ease-in-out infinite",
-          }}
-        />
-      )}
-
-      {/* Center pip */}
-      <div
-        style={{
-          position: "absolute",
-          top: "50%",
-          left: "50%",
-          width: isFound ? 8 : 5,
-          height: isFound ? 8 : 5,
-          background: isFound ? "var(--teal)" : "var(--coral)",
-          transform: "translate(-50%,-50%)",
-          transition: "all 200ms",
-          animation: "tacPip 1s steps(2) infinite",
-        }}
-      />
-
-      {/* Inner label */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          paddingBottom: 18,
-          pointerEvents: "none",
-        }}
-      >
-        {isFound ? (
-          <div
-            style={{
-              fontFamily: "var(--font-head)",
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: 2,
-              textTransform: "uppercase",
-              color: "var(--teal)",
-            }}
-          >
-            LOCKED
-          </div>
-        ) : (
-          <>
+          <div className="mm-badge">
             <div
+              className={`mm-badge-dot ${
+                isError
+                  ? "mm-badge-dot-error"
+                  : isFound
+                    ? "mm-badge-dot-found"
+                    : "mm-badge-dot-queue"
+              }`}
+            />
+            <span
               style={{
-                fontFamily: "var(--font-head)",
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 2,
-                textTransform: "uppercase",
-                color: "var(--coral)",
+                color: isError ? "#ef4444" : isFound ? "#14b8a6" : "#f97316",
+                transition: "color 0.4s",
               }}
             >
-              Scanning<span className="blink">...</span>
+              {isError ? "Error" : isFound ? "Matched" : "Global Queue"}
+            </span>
+          </div>
+
+          <span className="mm-region">Auto</span>
+        </header>
+
+        {/*  Body  */}
+        <main className="mm-body">
+          {/* Loader (arena + chip + timer + phase log) */}
+          <MatchmakingLoader phase={phase} elapsed={elapsed} />
+
+          {/* Title */}
+          <h2 className={`mm-title ${isError ? "mm-title-error" : ""}`}>
+            {phase === "connecting" && "Connecting..."}
+            {phase === "connected" && "Connected"}
+            {phase === "searching" && "Finding opponent"}
+            {phase === "found" && "Opponent found!"}
+            {phase === "joining" && "Joining match..."}
+            {phase === "ready" && "Ready to play"}
+            {phase === "error" && "Connection failed"}
+          </h2>
+
+          <p className="mm-subtitle">
+            {phase === "connecting" && "Establishing secure connection"}
+            {phase === "connected" && "Entering matchmaking queue"}
+            {phase === "searching" && "Scanning global matchmaking pool"}
+            {phase === "found" && "Locking in your opponent"}
+            {phase === "joining" && "Syncing match state"}
+            {phase === "ready" && "Starting match..."}
+            {phase === "error" && "Could not reach the server"}
+          </p>
+
+          {/* Scan bar — while actively searching / joining */}
+          {isSearching && (
+            <div className="mm-scan-track">
+              <div
+                className="mm-scan-bar"
+                style={{
+                  background:
+                    phase === "joining"
+                      ? "linear-gradient(90deg, transparent, #14b8a6, transparent)"
+                      : "linear-gradient(90deg, transparent, #f97316, transparent)",
+                }}
+              />
             </div>
-          </>
-        )}
+          )}
+
+          {/* Opponent card */}
+          {(isFound || phase === "joining") && matchInfo && (
+            <div className="mm-opponent-card">
+              <div className="mm-avatar">
+                {matchInfo.opponentName.slice(0, 2).toUpperCase()}
+              </div>
+              <div>
+                <div className="mm-opp-name">{matchInfo.opponentName}</div>
+                <div className="mm-opp-label">
+                  Playing as {matchInfo.iAmCreator ? "O" : "X"}
+                </div>
+                {searchDurationMs !== null && (
+                  <div className="mm-opp-found-time">
+                    Found in {fmtDuration(searchDurationMs)}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Error hint */}
+          {isError && (
+            <p className="mm-error-hint">
+              Could not reach the matchmaking server.
+              <br />
+              Check your connection and try again.
+            </p>
+          )}
+        </main>
+
+        {/*  Footer  */}
+        <footer className="mm-footer">
+          <button
+            className={`mm-cancel-btn ${isError ? "mm-btn-error" : "mm-btn-queue"}`}
+            onClick={handleCancel}
+          >
+            {isError ? "Go back" : isFound ? "Cancel" : "Cancel search"}
+          </button>
+        </footer>
       </div>
-
-      {/* CSS animations injected once */}
-      <style>{`
-        @keyframes tacRing { to { transform: rotate(360deg); } }
-        @keyframes tacScan {
-          0%  { top: 2px; opacity: 0; }
-          10% { opacity: 1; }
-          90% { opacity: 1; }
-          100%{ top: calc(100% - 2px); opacity: 0; }
-        }
-        @keyframes tacPip { 0%,100%{opacity:1} 50%{opacity:.15} }
-      `}</style>
-    </div>
-  );
-}
-
-function CornerBracket({
-  pos,
-  color,
-}: {
-  pos: "tl" | "tr" | "bl" | "br";
-  color: string;
-}) {
-  const style: React.CSSProperties = {
-    position: "absolute",
-    width: 18,
-    height: 18,
-    ...(pos === "tl" ? { top: -1, left: -1 } : {}),
-    ...(pos === "tr" ? { top: -1, right: -1, transform: "scaleX(-1)" } : {}),
-    ...(pos === "bl" ? { bottom: -1, left: -1, transform: "scaleY(-1)" } : {}),
-    ...(pos === "br"
-      ? { bottom: -1, right: -1, transform: "scale(-1,-1)" }
-      : {}),
-  };
-
-  return (
-    <div style={style}>
-      <svg viewBox="0 0 18 18" fill="none" width="18" height="18">
-        <path d="M0 16V2C0 .9.9 0 2 0h14" stroke={color} strokeWidth="2.5" />
-      </svg>
-    </div>
+    </>
   );
 }

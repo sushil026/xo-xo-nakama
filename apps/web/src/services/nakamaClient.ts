@@ -1,240 +1,197 @@
-import { Client, type Socket, type Session } from "@heroiclabs/nakama-js";
-import config from "../config";
+  import { Client, type Socket, type Session } from "@heroiclabs/nakama-js";
+  import config from "../config";
 
-// Singleton client
-const client = new Client(
-  "defaultkey",
-  config.nakama.host,
-  config.nakama.port,
-  config.nakama.ssl,
-);
+  const client = new Client(
+    "defaultkey",
+    config.nakama.host,
+    config.nakama.port,
+    config.nakama.ssl,
+  );
 
-// Module-level socket — exported for use in match handlers
-let _socket: Socket | null = null;
+  let _socket: Socket | null = null;
+  let _session: Session | null = null;
 
-export const getSocket = (): Socket => {
-  if (!_socket)
-    throw new Error("Socket not initialised. Call connect() first.");
-  return _socket;
-};
+  // Generation counter — incremented on every connect() call.
+  // Any in-flight async work can check if it's still current.
+  let _connectGen = 0;
 
-// Types
+  export const getSocket = (): Socket => {
+    if (!_socket)
+      throw new Error("Socket not initialised. Call connect() first.");
+    return _socket;
+  };
 
-export interface ConnectResult {
-  socket: Socket;
-  session: Session;
-  /**
-   * null  → new user (never called setupUser)
-   * string → returning user's chosen username
-   */
-  username: string | null;
-  deviceId: string;
-}
+  export const getConnectGen = () => _connectGen;
 
-export interface UserProfile {
-  username: string;
-  wins: number;
-  losses: number;
-  draws: number;
-  rating: number;
-}
+  // Types
 
-export interface MatchHistory {
-  matches: unknown[];
-}
+  export interface ConnectResult {
+    socket: Socket;
+    session: Session;
+    username: string | null;
+    deviceId: string;
+    gen: number; // the generation this connect() produced
+  }
 
-//  Device ID
-// Stable across sessions; survives app restarts.
-// On Capacitor this lives in the native storage layer via localStorage bridge.
+  export interface UserProfile {
+    username: string;
+    wins: number;
+    losses: number;
+    draws: number;
+    rating: number;
+  }
 
-const getOrCreateDeviceId = (): string => {
-  const existing = localStorage.getItem("xo_device_id");
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  localStorage.setItem("xo_device_id", id);
-  return id;
-};
+  export interface MatchHistory {
+    matches: unknown[];
+  }
 
-//  connect
-/**
- * 1. Get / create a stable deviceId
- * 2. Authenticate with Nakama (device auth creates account on first call,
- *    retrieves it on subsequent calls — idempotent)
- * 3. Open a real-time socket
- * 4. Read the "profile" storage object to decide new vs returning user.
- *    Nakama auto-assigns a random username on account creation, so we
- *    cannot rely on account.user.username to detect first-time users.
- */
-export const connect = async (): Promise<ConnectResult> => {
-  const deviceId = getOrCreateDeviceId();
+  const getOrCreateDeviceId = (): string => {
+    const existing = localStorage.getItem("xo_device_id");
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    localStorage.setItem("xo_device_id", id);
+    return id;
+  };
 
-  // Auth — create: true means create account if it doesn't exist
-  const session = await client.authenticateDevice(deviceId, true);
+  export const connect = async (): Promise<ConnectResult> => {
+    const deviceId = getOrCreateDeviceId();
+    const gen = ++_connectGen;
 
-  // Open real-time socket
-  const socket = client.createSocket(config.nakama.ssl, false);
-  await socket.connect(session, true);
-  _socket = socket;
-
-  // Check for an existing profile to determine new vs returning user
-  let username: string | null = null;
-  try {
-    const storageResult = await client.readStorageObjects(session, {
-      object_ids: [
-        {
-          collection: "profile",
-          key: "data",
-          user_id: session.user_id!,
-        },
-      ],
-    });
-
-    if (storageResult.objects && storageResult.objects.length > 0) {
-      const profile = storageResult.objects[0].value as UserProfile;
-      username = profile.username ?? null;
+    // Reuse existing session/socket if still current
+    if (_socket && _session) {
+      return {
+        socket: _socket,
+        session: _session,
+        username: localStorage.getItem("xo_username"),
+        deviceId,
+        gen,
+      };
     }
-  } catch {
-    // Storage read failure → treat as new user
-    username = null;
-  }
 
-  return { socket, session, username, deviceId };
-};
+    const session = await client.authenticateDevice(deviceId, true);
+    const socket = client.createSocket(config.nakama.ssl, false);
+    await socket.connect(session, true);
 
-// setupUser
-/**
- * Called once for new users after they choose a callsign.
- * Handles duplicate usernames by appending a random suffix.
- * Returns the final username that was stored.
- */
-export const setupUser = async (
-  session: Session,
-  desiredUsername: string,
-): Promise<string> => {
-  // Sanitise: trim, uppercase, max 16 chars, alphanumeric + underscore
-  const clean = desiredUsername
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9_]/g, "_")
-    .slice(0, 16);
+    _socket = socket;
+    _session = session;
 
-  let finalUsername = clean;
+    let username: string | null = null;
+    try {
+      const res = await client.readStorageObjects(session, {
+        object_ids: [{ collection: "profile", key: "data", user_id: session.user_id! }],
+      });
+      if (res.objects?.length) {
+        username = (res.objects[0].value as UserProfile).username;
+      }
+    } catch {
+      username = null;
+    }
 
-  // Try the exact name first, fall back to suffixed version on conflict
-  try {
-    await client.updateAccount(session, {
-      username: clean,
-      display_name: clean,
-    });
-  } catch {
-    // Username taken — append random 4-digit suffix
-    const suffix = String(Math.floor(Math.random() * 9000) + 1000);
-    finalUsername = `${clean.slice(0, 11)}_${suffix}`;
+    return { socket, session, username, deviceId, gen };
+  };
 
-    await client.updateAccount(session, {
-      username: finalUsername,
-      display_name: finalUsername,
-    });
-  }
+  /**
+   * Tears down the socket. Call this if you need a clean slate
+   * (e.g. StrictMode unmount before remount in dev).
+   */
+  export const disconnect = async (): Promise<void> => {
+    const s = _socket;
+    _socket = null;
+    _session = null;
+    try {
+      await s?.disconnect(false);
+    } catch {
+      // ignore
+    }
+  };
 
-  // Write profile to Nakama storage (public read so leaderboard can see it)
-  await client.writeStorageObjects(session, [
-    {
-      collection: "profile",
-      key: "data",
-      value: {
+  export const setupUser = async (
+    session: Session,
+    desiredUsername: string,
+  ): Promise<string> => {
+    const clean = desiredUsername
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, "_")
+      .slice(0, 16);
+
+    let finalUsername = clean;
+
+    try {
+      await client.updateAccount(session, { username: clean, display_name: clean });
+    } catch {
+      const suffix = String(Math.floor(Math.random() * 9000) + 1000);
+      finalUsername = `${clean.slice(0, 11)}_${suffix}`;
+      await client.updateAccount(session, {
         username: finalUsername,
-        wins: 0,
-        losses: 0,
-        draws: 0,
-        rating: 1200,
-      } satisfies UserProfile,
-      permission_read: 2, // public
-      permission_write: 1, // owner only
-    },
-  ]);
+        display_name: finalUsername,
+      });
+    }
 
-  // Cache locally for quick access
-  localStorage.setItem("xo_username", finalUsername);
-
-  return finalUsername;
-};
-
-//  Helpers
-
-/** Fetch profile from storage (useful after login to get cached stats) */
-export const getProfile = async (session: Session) => {
-  const res = await client.readStorageObjects(session, {
-    object_ids: [
+    await client.writeStorageObjects(session, [
       {
         collection: "profile",
         key: "data",
-        user_id: session.user_id,
+        value: {
+          username: finalUsername,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          rating: 1200,
+        } satisfies UserProfile,
+        permission_read: 2,
+        permission_write: 1,
       },
-    ],
-  });
+    ]);
 
-  return res.objects?.[0]?.value || null;
-};
+    localStorage.setItem("xo_username", finalUsername);
+    return finalUsername;
+  };
 
-/** Update profile stats (wins, losses, etc.) */
-export const updateProfile = async (
-  session: Session,
-  patch: Partial<Omit<UserProfile, "username">>,
-): Promise<void> => {
-  const current = await getProfile(session);
-  if (!current) return;
+  export const getProfile = async (session: Session) => {
+    const res = await client.readStorageObjects(session, {
+      object_ids: [{ collection: "profile", key: "data", user_id: session.user_id }],
+    });
+    return res.objects?.[0]?.value || null;
+  };
 
-  await client.writeStorageObjects(session, [
-    {
-      collection: "profile",
-      key: "data",
-      value: { ...current, ...patch },
-      permission_read: 2,
-      permission_write: 1,
-    },
-  ]);
-};
-
-export const getMatchHistory = async (session: Session) => {
-  const res = await client.readStorageObjects(session, {
-    object_ids: [
+  export const updateProfile = async (
+    session: Session,
+    patch: Partial<Omit<UserProfile, "username">>,
+  ): Promise<void> => {
+    const current = await getProfile(session);
+    if (!current) return;
+    await client.writeStorageObjects(session, [
       {
-        collection: "user_matches",
-        key: "list",
-        user_id: session.user_id!,
+        collection: "profile",
+        key: "data",
+        value: { ...current, ...patch },
+        permission_read: 2,
+        permission_write: 1,
       },
-    ],
-  });
+    ]);
+  };
 
-  if (!res.objects?.length) return [];
+  export const getMatchHistory = async (session: Session) => {
+    const res = await client.readStorageObjects(session, {
+      object_ids: [{ collection: "user_matches", key: "list", user_id: session.user_id! }],
+    });
+    if (!res.objects?.length) return [];
+    return (res.objects[0].value as MatchHistory)?.matches || [];
+  };
 
-  return (res.objects[0].value as MatchHistory)?.matches || [];
-};
+  export const getMatchById = async (session: Session, matchId: string) => {
+    const res = await client.readStorageObjects(session, {
+      object_ids: [{ collection: "matches", key: matchId }],
+    });
+    if (!res.objects?.length) return null;
+    return res.objects[0].value;
+  };
 
-export const getMatchById = async (session: Session, matchId: string) => {
-  const res = await client.readStorageObjects(session, {
-    object_ids: [
-      {
-        collection: "matches",
-        key: matchId,
-      },
-    ],
-  });
+  export const getFullMatchHistory = async (session: Session) => {
+    const ids = await getMatchHistory(session);
+    const matches = await Promise.all(ids.map((id) => getMatchById(session, id as string)));
+    return matches.filter(Boolean);
+  };
 
-  if (!res.objects?.length) return null;
-
-  return res.objects[0].value;
-};
-
-export const getFullMatchHistory = async (session: Session) => {
-  const ids = await getMatchHistory(session);
-
-  const matches = await Promise.all(
-    ids.map((id) => getMatchById(session, id as string)),
-  );
-
-  return matches.filter(Boolean);
-};
-
-export { client };
+  export { client };
