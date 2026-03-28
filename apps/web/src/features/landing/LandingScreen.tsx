@@ -6,19 +6,30 @@ import {
 } from "../../utils/usernameGenerator";
 import type { Session } from "@heroiclabs/nakama-js";
 
-//  Types
-type Phase =
-  | "connecting" // booting, talking to Nakama
-  | "new_user" // first time — show name picker
-  | "saving" // user hit confirm, waiting for server
-  | "done"; // redirect (existing or just saved)
+type Phase = "connecting" | "new_user" | "saving" | "done";
 
-// Subcomponents
+// Returning user = has both a stored device id and username
+function hasStoredSession(): boolean {
+  return !!(
+    localStorage.getItem("xo_device_id") && localStorage.getItem("xo_username")
+  );
+}
 
-function LoadingScreen() {
+interface Props {
+  isOffline: boolean;
+  onStart: () => void;
+  onPlayLocal: () => void;
+}
+
+function LoadingScreen({
+  isOffline,
+  onPlayLocal,
+}: {
+  isOffline: boolean;
+  onPlayLocal: () => void;
+}) {
   return (
     <div className="loading-screen">
-      {/* background glyphs */}
       <span
         className="bg-glyph pulse"
         style={{ fontSize: 220, right: -30, top: -20 }}
@@ -39,27 +50,51 @@ function LoadingScreen() {
           XO<span className="loading-logo-accent">.</span>
         </div>
 
-        <div
-          className="t-label mt-16"
-          style={{ display: "block", marginBottom: 12 }}
-        >
-          Connecting<span className="blink">...</span>
-        </div>
-
-        <div className="loading-bar-wrap" style={{ margin: "0 auto" }}>
-          <div className="loading-bar-fill" />
-        </div>
+        {isOffline ? (
+          <>
+            <div
+              className="t-label mt-16"
+              style={{
+                display: "block",
+                marginBottom: 16,
+                color: "var(--coral)",
+              }}
+            >
+              No connection detected
+            </div>
+            <p
+              className="t-body"
+              style={{ marginBottom: 20, color: "var(--soft)" }}
+            >
+              Online features unavailable.
+            </p>
+            <button
+              className="btn btn-primary"
+              onClick={onPlayLocal}
+              type="button"
+            >
+              Play Local →
+            </button>
+          </>
+        ) : (
+          <>
+            <div
+              className="t-label mt-16"
+              style={{ display: "block", marginBottom: 12 }}
+            >
+              Connecting<span className="blink">...</span>
+            </div>
+            <div className="loading-bar-wrap" style={{ margin: "0 auto" }}>
+              <div className="loading-bar-fill" />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-interface DeviceTagProps {
-  deviceId: string;
-}
-
-function DeviceTag({ deviceId }: DeviceTagProps) {
-  // Show only the first 8 chars normally; reveal full on hover/tap
+function DeviceTag({ deviceId }: { deviceId: string }) {
   const [expanded, setExpanded] = useState(false);
   const short = deviceId ? deviceId.slice(0, 8).toUpperCase() : "--------";
   const full = deviceId ? deviceId.toUpperCase() : "";
@@ -91,102 +126,95 @@ function DeviceTag({ deviceId }: DeviceTagProps) {
   );
 }
 
-// Main component
-interface LandingScreenProps {
-  onStart: () => void;
-}
-
-export default function LandingScreen({ onStart }: LandingScreenProps) {
-  const [phase, setPhase] = useState<Phase>("connecting");
-  const [, setUsername] = useState("");
-  const [inputVal, setInputVal] = useState(""); // controlled input
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+export default function LandingScreen({
+  isOffline,
+  onStart,
+  onPlayLocal,
+}: Props) {
+  const [phase, setPhase] = useState<Phase>(
+    hasStoredSession() ? "done" : "connecting",
+  );
+  const initialUsername = generateUsername();
+  const [inputVal, setInputVal] = useState(initialUsername);
+  const [suggestions, setSuggestions] = useState(randomSuggestions(4));
   const [deviceId, setDeviceId] = useState("");
   const [error, setError] = useState("");
   const sessionRef = useRef<Session | null>(null);
   const onStartRef = useRef(onStart);
 
-  // ── Keep onStartRef in sync ──
+  const prepareNewUser = () => {
+    const generated = generateUsername();
+    const suggestions = randomSuggestions(4);
+    setInputVal(generated);
+    setSuggestions(suggestions);
+    setError("");
+    setPhase("new_user");
+  };
+
   useEffect(() => {
     onStartRef.current = onStart;
   }, [onStart]);
 
-  // ── Initialise ──
   useEffect(() => {
-    let cancelled = false;
+    if (phase === "done") {
+      onStartRef.current();
+    }
+  }, [phase]);
 
-    const init = async () => {
+  useEffect(() => {
+    if (phase !== "connecting") return;
+    let cancelled = false;
+    const run = async () => {
+      if (isOffline) {
+        if (cancelled) return;
+        prepareNewUser();
+        return;
+      }
       try {
         const res = await connect();
         if (cancelled) return;
-
         setDeviceId(res.deviceId);
         sessionRef.current = res.session;
-
         if (res.username) {
-          // Returning user — skip screen
           localStorage.setItem("xo_username", res.username);
           setPhase("done");
-          onStartRef.current();
         } else {
-          // New user — generate a suggested name and show picker
-          const generated = generateUsername();
-          setUsername(generated);
-          setInputVal(generated);
-          setSuggestions(randomSuggestions(4));
-          setPhase("new_user");
+          prepareNewUser();
         }
       } catch (err) {
-        console.warn("Initial connect failed, retrying...", err);
-
-        // 🔁 retry once silently
+        console.warn("Connect failed, retrying...", err);
         try {
           const retry = await connect();
-
           if (cancelled) return;
-
           setDeviceId(retry.deviceId);
           sessionRef.current = retry.session;
-
           if (retry.username) {
             localStorage.setItem("xo_username", retry.username);
             setPhase("done");
-            onStartRef.current();
             return;
           }
         } catch (retryErr) {
-          console.warn("Retry also failed", retryErr);
+          console.warn("Retry failed", retryErr);
         }
-
-        // fallback → still usable UI
-        const generated = generateUsername();
-        setUsername(generated);
-        setInputVal(generated);
-        setSuggestions(randomSuggestions(4));
-
-        // ❌ REMOVE scary error
-        setError(""); // 👈 key change
-
-        setPhase("new_user");
+        prepareNewUser();
       }
     };
 
-    init();
+    run();
+
     return () => {
       cancelled = true;
     };
-  }, []); // intentionally empty — runs once
+  }, [phase, isOffline]);
 
   const reroll = useCallback(() => {
     const next = generateUsername();
-    setUsername(next);
     setInputVal(next);
     setSuggestions(randomSuggestions(4));
     setError("");
   }, []);
 
   const pickSuggestion = useCallback((name: string) => {
-    setUsername(name);
     setInputVal(name);
     setError("");
   }, []);
@@ -201,6 +229,14 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
       setError("Callsign must be at least 3 characters.");
       return;
     }
+
+    // Offline: just save locally and go
+    if (isOffline) {
+      localStorage.setItem("xo_username", trimmed);
+      onPlayLocal();
+      return;
+    }
+
     if (!sessionRef.current) {
       setError("Not connected — please wait or reload.");
       return;
@@ -208,7 +244,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
 
     setPhase("saving");
     setError("");
-
     try {
       const finalName = await setupUser(sessionRef.current, trimmed);
       localStorage.setItem("xo_username", finalName);
@@ -221,17 +256,10 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
     }
   };
 
-  // ── Render: loading ──
-  if (phase === "connecting") {
-    return <LoadingScreen />;
-  }
+  if (phase === "connecting")
+    return <LoadingScreen isOffline={isOffline} onPlayLocal={onPlayLocal} />;
+  if (phase === "done") return null;
 
-  // ── Render: returning user redirecting (flicker-free) ──
-  if (phase === "done") {
-    return null;
-  }
-
-  // ── Render: new user name picker ──
   const charCount = inputVal.length;
   const isSaving = phase === "saving";
   const canConfirm = !isSaving && charCount >= 3;
@@ -239,7 +267,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
 
   return (
     <div className="screen" role="main">
-      {/* Background glyphs */}
       <span
         className="bg-glyph pulse"
         style={{ fontSize: 220, right: -30, top: -20 }}
@@ -255,14 +282,34 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         O
       </span>
 
-      {/* Top bar */}
       <header className="topbar">
         <div className="topbar-logo">
           XO<span className="topbar-logo-accent">.</span>
         </div>
+        {isOffline && (
+          <span
+            className="pill"
+            style={{
+              borderColor: "var(--coral)",
+              color: "var(--coral)",
+              fontSize: 9,
+            }}
+          >
+            <span
+              style={{
+                display: "inline-block",
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: "var(--coral)",
+                marginRight: 5,
+              }}
+            />
+            Offline
+          </span>
+        )}
       </header>
 
-      {/* Hero section */}
       <section
         style={{
           padding: "24px var(--pad) 0",
@@ -272,7 +319,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         className="fade-up-1"
       >
         <span className="t-label">Player identification</span>
-
         <div style={{ marginTop: 12 }}>
           <span className="t-display" style={{ display: "block" }}>
             X0.
@@ -283,7 +329,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
             callsign
           </h1>
         </div>
-
         <p className="t-body" style={{ marginTop: 10 }}>
           Your handle is how other players know you.
           <br />
@@ -291,7 +336,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         </p>
       </section>
 
-      {/* Input section */}
       <section
         style={{
           padding: "16px var(--pad) 0",
@@ -306,25 +350,17 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         >
           Callsign
         </span>
-
         <h2
           className="field"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            minHeight: "48px",
-          }}
+          style={{ display: "flex", alignItems: "center", minHeight: "48px" }}
         >
           {inputVal}
         </h2>
-
-        {/* Inline progress bar — fills as you type */}
         <div className="prog-bar" style={{ marginTop: 6 }}>
           <div className="prog-fill" style={{ width: `${progress}%` }} />
         </div>
       </section>
 
-      {/* Suggestion chips */}
       <section
         style={{
           padding: "16px var(--pad) 0",
@@ -346,7 +382,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
             </button>
           ))}
         </div>
-
         <button
           className="btn btn-ghost btn-sm"
           onClick={reroll}
@@ -358,7 +393,6 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         </button>
       </section>
 
-      {/* Error message */}
       {error && (
         <div
           className="error-msg fade-up"
@@ -369,19 +403,15 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         </div>
       )}
 
-      {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* CTA footer */}
       <footer
         style={{ padding: "0 var(--pad)", position: "relative", zIndex: 1 }}
         className="fade-up-4"
       >
-        {/* Session progress hint */}
         <div className="prog-bar" style={{ marginBottom: 16 }}>
           <div className="prog-fill" style={{ width: "20%" }} />
         </div>
-
         <button
           className="btn btn-primary btn-full"
           onClick={handleConfirm}
@@ -391,16 +421,28 @@ export default function LandingScreen({ onStart }: LandingScreenProps) {
         >
           {isSaving ? (
             <>
-              <span className="blink">▪</span>
-              Saving callsign
+              <span className="blink">▪</span> Saving callsign
             </>
+          ) : isOffline ? (
+            "Play Local →"
           ) : (
             "Confirm callsign →"
           )}
         </button>
+        {isOffline && (
+          <p
+            className="t-label"
+            style={{
+              textAlign: "center",
+              marginTop: 10,
+              color: "var(--muted)",
+            }}
+          >
+            Online features unavailable in offline mode
+          </p>
+        )}
       </footer>
 
-      {/* Device ID — tasteful footer identifier */}
       <div className="fade-up-5">
         <DeviceTag deviceId={deviceId} />
       </div>
