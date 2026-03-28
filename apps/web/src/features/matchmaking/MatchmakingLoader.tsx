@@ -11,18 +11,14 @@ type Phase =
 
 interface Props {
   phase: Phase;
-  elapsed: number;
 }
 
-export default function MatchmakingLoader({ phase, elapsed }: Props) {
+export default function MatchmakingLoader({ phase }: Props) {
   const isFound = phase === "found" || phase === "ready";
   const isJoining = phase === "joining";
   const isError = phase === "error";
   const isSearching = phase === "searching";
   const isConnecting = phase === "connecting" || phase === "connected";
-
-  const fmt = (s: number) =>
-    `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
 
   const accentColor = isError
     ? "#ef4444"
@@ -377,19 +373,6 @@ export default function MatchmakingLoader({ phase, elapsed }: Props) {
         {phase === "ready" && "Match confirmed"}
         {phase === "error" && "Connection lost"}
       </div>
-
-      {/* ── Realtime elapsed timer ── */}
-      {!isError && phase !== "ready" && (
-        <div
-          className={`mm-timer-pill ${isFound || isJoining ? "mm-teal" : ""}`}
-          style={{ ["--acc" as string]: accentColor } as CSSProperties}
-        >
-          <div className="mm-timer-blinker" />
-          {fmt(elapsed)}
-        </div>
-      )}
-
-      {/* timing shown inside opponent card in MatchmakingScreen */}
     </div>
   );
 }

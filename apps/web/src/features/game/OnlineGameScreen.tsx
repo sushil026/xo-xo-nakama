@@ -134,6 +134,7 @@ export default function OnlineGameScreen({
   const [waiting, setWaiting] = useState(true);
   const [timeLeft, setTimeLeft] = useState(TIMER_SECS);
   const [forfeitMsg, setForfeitMsg] = useState<string | null>(null);
+  const [timeoutMsg, setTimeoutMsg] = useState<string | null>(null);
 
   const boardRef = useRef<Cell[]>(Array(9).fill(null));
   const myUserIdRef = useRef<string | null>(null);
@@ -159,28 +160,12 @@ export default function OnlineGameScreen({
         if (prev <= 1) {
           clearTimer();
           // Auto-forfeit on timeout — only if still my turn and game ongoing
-          if (
-            isMyTurnRef.current &&
-            !resultRef.current &&
-            !waitingRef.current
-          ) {
-            log.warn("Timer expired — auto-forfeit");
-            try {
-              const socket = getSocket();
-              const payload = new TextEncoder().encode(
-                JSON.stringify({ forfeit: true }),
-              );
-              socket.sendMatchState(matchId, OP_STATE, payload);
-            } catch (e) {
-              log.error("Auto-forfeit send failed", e);
-            }
-          }
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
-  }, [clearTimer, matchId]);
+  }, [clearTimer]);
 
   //  Apply server state
   const applyServerState = useCallback(
@@ -219,6 +204,20 @@ export default function OnlineGameScreen({
 
       if (ss.winner) {
         clearTimer();
+
+        const boardFull = ss.board.every((c) => c !== null);
+        const lastMoveWasWinning = checkWinLine(cells) !== null;
+
+        // Timeout: game ended with empty cells and no winning line
+        if (!boardFull && !lastMoveWasWinning && ss.winner !== "draw") {
+          const iWonByTimeout = ss.winner === mySymbol;
+          setTimeoutMsg(
+            iWonByTimeout
+              ? "Opponent ran out of time — you win!"
+              : "You ran out of time — opponent wins",
+          );
+        }
+
         resultRef.current =
           ss.winner === "draw"
             ? "draw"
@@ -227,7 +226,6 @@ export default function OnlineGameScreen({
               : oppSymbol;
         setResult(resultRef.current);
         if (resultRef.current !== "draw") setWinLine(checkWinLine(cells));
-        log.info(`Game over — winner: ${ss.winner}`);
       } else {
         // Restart timer on every new state (turn changed)
         startTimer();
@@ -362,6 +360,7 @@ export default function OnlineGameScreen({
   //  Derived
   const timerLow = timeLeft <= 10 && isMyTurn && !result && !waiting;
   const activeColor = isMyTurn ? "var(--coral)" : "var(--amber)";
+  const NUM_BARS = 10;
 
   return (
     <div
@@ -497,18 +496,27 @@ export default function OnlineGameScreen({
               gap: 3,
             }}
           >
-            {Array.from({ length: TIMER_SECS }).map((_, i) => (
-              <div
-                key={i}
-                style={{
-                  flex: 1,
-                  height: isMyTurn ? (timerLow ? 5 : 4) : 4,
-                  background: i < timeLeft ? activeColor : "var(--surface-hi)",
-                  opacity: i < timeLeft ? (timerLow ? 1 : 0.75) : 0.25,
-                  transition: "background 60ms steps(1), height 60ms steps(1)",
-                }}
-              />
-            ))}
+            {Array.from({ length: NUM_BARS }).map((_, i) => {
+              const filled = i < Math.ceil((timeLeft / TIMER_SECS) * NUM_BARS);
+              const opacity = filled
+                ? timerLow
+                  ? 1 - (i / NUM_BARS) * 0.2 // stay vivid when urgent
+                  : 0.45 + (1 - i / NUM_BARS) * 0.45 // fade left→right
+                : 0.15;
+              return (
+                <div
+                  key={i}
+                  style={{
+                    flex: 1,
+                    height: 14,
+                    borderRadius: 2,
+                    background: filled ? activeColor : "var(--surface-hi)",
+                    opacity,
+                    transition: "opacity 300ms ease, background 60ms steps(1)",
+                  }}
+                />
+              );
+            })}
           </div>
         </>
       )}
@@ -577,6 +585,7 @@ export default function OnlineGameScreen({
             mySymbol={mySymbol}
             oppLabel={opponentName}
             forfeitMsg={forfeitMsg}
+            timeoutMsg={timeoutMsg}
             board={board}
             winLine={winLine}
             onBack={onBack}
@@ -674,6 +683,7 @@ function ResultCard({
   mySymbol,
   oppLabel,
   forfeitMsg,
+  timeoutMsg,
   board,
   winLine,
   onBack,
@@ -682,6 +692,7 @@ function ResultCard({
   mySymbol: Player;
   oppLabel: string;
   forfeitMsg: string | null;
+  timeoutMsg: string | null;
   board: Cell[];
   winLine: readonly number[] | null;
   onBack: () => void;
@@ -767,7 +778,15 @@ function ResultCard({
               marginBottom: 14,
             }}
           >
-            {isDraw ? "STALEMATE" : iWon ? "CHAMPION" : "ELIMINATED"}
+            {isDraw
+              ? "STALEMATE"
+              : forfeitMsg
+                ? "FORFEIT"
+                : timeoutMsg
+                  ? "TIMEOUT"
+                  : iWon
+                    ? "CHAMPION"
+                    : "ELIMINATED"}
           </div>
 
           {/* Headline */}
@@ -794,11 +813,13 @@ function ResultCard({
             >
               {forfeitMsg
                 ? forfeitMsg
-                : isDraw
-                  ? "Neither player claimed victory."
-                  : iWon
-                    ? `You defeated ${oppLabel}.`
-                    : `${oppLabel} wins this round.`}
+                : timeoutMsg
+                  ? timeoutMsg
+                  : isDraw
+                    ? "Neither player claimed victory."
+                    : iWon
+                      ? `You defeated ${oppLabel}.`
+                      : `${oppLabel} wins this round.`}
             </p>
           </div>
 

@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { connect, disconnect, getSocket } from "../../services/nakamaClient";
 import MatchmakingLoader from "./MatchmakingLoader";
 
-// "connected" is an internal UI-only phase: socket is ready but we hold briefly
-// before entering the queue, so the user sees it transition rather than snap.
 type Phase =
   | "connecting"
   | "connected"
@@ -25,10 +23,9 @@ interface Props {
   onCancel: () => void;
 }
 
-const CONNECTED_LINGER_MS = 2200; // After socket opens, wait before joining queue
-const FOUND_LINGER_MS = 3000; // After opponent detected, wait before joinMatch
+const CONNECTED_LINGER_MS = 2200;
+const FOUND_LINGER_MS = 3000;
 
-//  Logging helpers
 const ts = () => new Date().toISOString().slice(11, 19);
 const log = {
   info: (m: string, d?: unknown) =>
@@ -39,7 +36,6 @@ const log = {
     console.error(`%c[MM ${ts()}] ${m}`, "color:#ef4444", d ?? ""),
 };
 
-//  Formats search duration for the opponent card
 const fmtDuration = (ms: number) =>
   ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 
@@ -49,17 +45,12 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
   const [matchInfo, setMatchInfo] = useState<MatchInfo | null>(null);
   const [searchDurationMs, setSearchDurationMs] = useState<number | null>(null);
 
-  // Refs so async callbacks always read fresh values without stale closures
   const ticketRef = useRef<string | null>(null);
   const cancelledRef = useRef(false);
   const joinedRef = useRef(false);
-
-  // Timestamp when searching phase began — to measure how long it took to find
   const searchStartRef = useRef<number>(0);
-  // Track the current phase in a ref so async callbacks always read latest
   const phaseRef = useRef<Phase>("connecting");
 
-  //  Global elapsed timer
   useEffect(() => {
     const id = setInterval(() => {
       if (!cancelledRef.current) setElapsed((e) => e + 1);
@@ -67,13 +58,11 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
     return () => clearInterval(id);
   }, []);
 
-  //  Phase transition helper
   const transition = (next: Phase) => {
     phaseRef.current = next;
     setPhase(next);
   };
 
-  //  Main matchmaking flow
   useEffect(() => {
     cancelledRef.current = false;
     joinedRef.current = false;
@@ -92,16 +81,13 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
 
     const run = async () => {
       try {
-        //  1. Connect
         const result = await connect();
         if (!alive) return;
 
-        //  2. Linger on "connected" so the user sees the state
         transition("connected");
         await new Promise<void>((res) => setTimeout(res, CONNECTED_LINGER_MS));
         if (!alive) return;
 
-        //  3. Enter matchmaking queue
         searchStartRef.current = Date.now();
         transition("searching");
 
@@ -109,7 +95,6 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
           if (!alive || joinedRef.current) return;
           joinedRef.current = true;
 
-          //  4. Opponent found — record how long search took, linger
           const dur = Date.now() - searchStartRef.current;
           setSearchDurationMs(dur);
           transition("found");
@@ -140,11 +125,9 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
             iAmCreator,
           });
 
-          // Hold on "found" so the user can see the opponent card appear
           await new Promise<void>((res) => setTimeout(res, FOUND_LINGER_MS));
           if (!alive) return;
 
-          //  5. Join match
           transition("joining");
 
           const match = await result.socket.joinMatch(matched.match_id);
@@ -157,7 +140,6 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
             iAmCreator,
           });
 
-          //  6. Ready
           transition("ready");
 
           setTimeout(() => {
@@ -203,7 +185,6 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
     };
   }, [onMatchFound]);
 
-  //  Cancel
   const handleCancel = () => {
     cancelledRef.current = true;
     joinedRef.current = true;
@@ -229,10 +210,52 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
     onCancel();
   };
 
-  //  Derived state
   const isSearching = phase === "searching" || phase === "joining";
   const isFound = phase === "found" || phase === "ready";
   const isError = phase === "error";
+
+  // Coral when searching/connecting, amber when found, red when error
+  const accentColor = isError
+    ? "var(--coral)"
+    : isFound
+      ? "var(--amber)"
+      : "var(--coral)";
+
+  const accentRgb = isError
+    ? "255,85,64"
+    : isFound
+      ? "240,160,80"
+      : "255,85,64";
+
+  const phaseLabel = {
+    connecting: "CONNECTING",
+    connected: "CONNECTED",
+    searching: "SEARCHING",
+    found: "MATCHED",
+    joining: "JOINING",
+    ready: "READY",
+    error: "ERROR",
+  }[phase];
+
+  const headline = {
+    connecting: "Connecting",
+    connected: "Connected",
+    searching: "Finding opponent",
+    found: "Opponent found",
+    joining: "Joining match",
+    ready: "Ready to play",
+    error: "Connection failed",
+  }[phase];
+
+  const subtitle = {
+    connecting: "Establishing secure connection",
+    connected: "Entering matchmaking queue",
+    searching: "Scanning global matchmaking pool",
+    found: "Locking in your opponent",
+    joining: "Syncing match state",
+    ready: "Starting match...",
+    error: "Could not reach the server",
+  }[phase];
 
   return (
     <>
@@ -259,371 +282,422 @@ export default function MatchmakingScreen({ onMatchFound, onCancel }: Props) {
           from { opacity: 0; transform: translateY(6px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-
-        .mm-screen {
-          position: relative;
-          display: flex;
-          flex-direction: column;
-          min-height: 100dvh;
-          background: #0a0a0f;
-          color: #e8e8f0;
-          font-family: 'Inter', 'SF Pro Display', system-ui, sans-serif;
-          overflow: hidden;
-          animation: mmScreenFadeIn 0.3s ease-out;
+        @keyframes mmBlink {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0; }
         }
-
-        .mm-bg-gradient {
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          transition: background 0.8s ease;
-        }
-        .mm-bg-searching {
-          background:
-            radial-gradient(ellipse 80% 60% at 20% 80%, rgba(249,115,22,0.07) 0%, transparent 60%),
-            radial-gradient(ellipse 60% 50% at 80% 20%, rgba(20,184,166,0.05) 0%, transparent 55%);
-        }
-        .mm-bg-found {
-          background:
-            radial-gradient(ellipse 80% 60% at 20% 80%, rgba(20,184,166,0.08) 0%, transparent 60%),
-            radial-gradient(ellipse 60% 50% at 80% 20%, rgba(20,184,166,0.06) 0%, transparent 55%);
-        }
-        .mm-bg-error {
-          background:
-            radial-gradient(ellipse 80% 60% at 50% 80%, rgba(239,68,68,0.07) 0%, transparent 60%);
-        }
-
-        .mm-grid {
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          background-image:
-            linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
-          background-size: 44px 44px;
-          animation: mmGridPulse 4s ease-in-out infinite;
-        }
-
-        /*  Topbar  */
-        .mm-topbar {
-          position: relative;
-          z-index: 2;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 16px 20px;
-          border-bottom: 1px solid rgba(255,255,255,0.06);
-        }
-        .mm-back-btn {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          background: transparent;
-          border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 8px;
-          color: rgba(255,255,255,0.55);
-          font-size: 13px;
-          font-weight: 500;
-          padding: 7px 12px;
-          cursor: pointer;
-          transition: border-color 0.15s, color 0.15s;
-          letter-spacing: 0.01em;
-        }
-        .mm-back-btn:hover {
-          border-color: rgba(255,255,255,0.22);
-          color: rgba(255,255,255,0.8);
-        }
-        .mm-badge {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 0.1em;
-          text-transform: uppercase;
-        }
-        .mm-badge-dot {
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-          transition: background 0.4s, box-shadow 0.4s;
-        }
-        .mm-badge-dot-queue  { background: #f97316; box-shadow: 0 0 0 2px rgba(249,115,22,0.28); }
-        .mm-badge-dot-found  { background: #14b8a6; box-shadow: 0 0 0 2px rgba(20,184,166,0.28); }
-        .mm-badge-dot-error  { background: #ef4444; }
-        .mm-region {
-          font-size: 11px;
-          font-weight: 600;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.22);
-        }
-
-        /*  Body  */
-        .mm-body {
-          position: relative;
-          z-index: 1;
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          padding: 0 24px 24px;
-        }
-
-        .mm-title {
-          margin-top: 26px;
-          font-size: 22px;
-          font-weight: 700;
-          letter-spacing: -0.02em;
-          color: #f0f0f8;
-          text-align: center;
-          transition: color 0.3s;
-        }
-        .mm-title-error { color: #ef4444; }
-        .mm-subtitle {
-          margin-top: 8px;
-          font-size: 14px;
-          color: rgba(255,255,255,0.36);
-          text-align: center;
-          letter-spacing: 0.01em;
-          min-height: 22px;
-        }
-
-        /*  Scan bar  */
-        .mm-scan-track {
-          margin-top: 28px;
-          width: 100%;
-          max-width: 220px;
-          height: 2px;
-          background: rgba(255,255,255,0.07);
-          border-radius: 2px;
-          overflow: hidden;
-        }
-        .mm-scan-bar {
-          height: 100%;
-          width: 40%;
-          transform-origin: left;
-          animation: mmBarLoop 1.8s ease-in-out infinite;
-          transition: background 0.4s;
-        }
-
-        /*  Opponent card  */
-        .mm-opponent-card {
-          margin-top: 24px;
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          background: rgba(20,184,166,0.08);
-          border: 1px solid rgba(20,184,166,0.22);
-          border-radius: 14px;
-          padding: 14px 18px;
-          animation: mmOpponentIn 0.38s cubic-bezier(0.34,1.56,0.64,1);
-          min-width: 218px;
-        }
-        .mm-avatar {
-          width: 38px;
-          height: 38px;
-          border-radius: 10px;
-          background: rgba(20,184,166,0.18);
-          border: 1px solid rgba(20,184,166,0.3);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 15px;
-          font-weight: 700;
-          color: #14b8a6;
-          text-transform: uppercase;
-          flex-shrink: 0;
-        }
-        .mm-opp-name  { font-size: 15px; font-weight: 600; color: #e8e8f0; letter-spacing: -0.01em; }
-        .mm-opp-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #14b8a6; margin-top: 3px; }
-        .mm-opp-side  { font-size: 11px; font-weight: 500; color: rgba(255,255,255,0.3); margin-top: 2px; }
-
-        /*  Error hint  */
-        .mm-error-hint {
-          margin-top: 14px;
-          font-size: 13px;
-          color: rgba(255,255,255,0.28);
-          text-align: center;
-          max-width: 240px;
-          line-height: 1.55;
-          animation: mmFadeSlideIn 0.3s ease-out;
-        }
-
-        /*  Footer  */
-        .mm-footer {
-          position: relative;
-          z-index: 2;
-          padding: 0 20px 36px;
-        }
-        .mm-cancel-btn {
-          width: 100%;
-          padding: 14px;
-          border-radius: 12px;
-          font-size: 15px;
-          font-weight: 600;
-          letter-spacing: 0.01em;
-          cursor: pointer;
-          border: none;
-          transition: background 0.2s, color 0.2s, transform 0.1s;
-        }
-        .mm-cancel-btn:active { transform: scale(0.98); }
-        .mm-btn-queue {
-          background: rgba(255,255,255,0.055);
-          color: rgba(255,255,255,0.45);
-          border: 1px solid rgba(255,255,255,0.08);
-        }
-        .mm-btn-queue:hover {
-          background: rgba(255,255,255,0.09);
-          color: rgba(255,255,255,0.65);
-        }
-        .mm-btn-error {
-          background: rgba(249,115,22,0.12);
-          color: #f97316;
-          border: 1px solid rgba(249,115,22,0.2);
-        }
-        .mm-btn-error:hover { background: rgba(249,115,22,0.18); }
-
-        .mm-opp-found-time {
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 0.07em;
-          text-transform: uppercase;
-          color: rgba(20,184,166,0.65);
-          margin-top: 5px;
+        @keyframes pulse {
+          0%, 100% { opacity: 0.15; }
+          50%       { opacity: 0.35; }
         }
       `}</style>
 
-      <div className="mm-screen">
-        {/* Background */}
+      <div
+        className="screen"
+        role="main"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          overflow: "hidden",
+          animation: "mmScreenFadeIn 0.3s ease-out",
+        }}
+      >
+        {/* Background glyphs — same as game screen */}
+        <span
+          className="bg-glyph pulse"
+          style={{
+            fontSize: 200,
+            right: -30,
+            top: -20,
+            animationName: "pulse",
+          }}
+          aria-hidden
+        >
+          X
+        </span>
+        <span
+          className="bg-glyph"
+          style={{
+            fontSize: 150,
+            left: -20,
+            bottom: 80,
+            animationName: "pulse",
+            animationDelay: "2s",
+          }}
+          aria-hidden
+        >
+          O
+        </span>
+
+        {/* Grid overlay */}
         <div
-          className={`mm-bg-gradient ${
-            isError
-              ? "mm-bg-error"
-              : isFound
-                ? "mm-bg-found"
-                : "mm-bg-searching"
-          }`}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            backgroundImage:
+              "linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)",
+            backgroundSize: "44px 44px",
+            animation: "mmGridPulse 4s ease-in-out infinite",
+            zIndex: 0,
+          }}
         />
-        <div className="mm-grid" />
 
-        {/*  Topbar  */}
-        <header className="mm-topbar">
-          <button className="mm-back-btn" onClick={handleCancel}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path
-                d="M9 2L4 7L9 12"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-            Back
+        {/* Accent glow behind center */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            background: `radial-gradient(ellipse 70% 50% at 50% 60%, rgba(${accentRgb},0.07) 0%, transparent 70%)`,
+            transition: "background 0.8s ease",
+            zIndex: 0,
+          }}
+        />
+
+        {/* TOPBAR */}
+        <header
+          className="topbar"
+          style={{ flexShrink: 0, position: "relative", zIndex: 2 }}
+        >
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={handleCancel}
+            type="button"
+          >
+            ←
           </button>
-
-          <div className="mm-badge">
-            <div
-              className={`mm-badge-dot ${
-                isError
-                  ? "mm-badge-dot-error"
-                  : isFound
-                    ? "mm-badge-dot-found"
-                    : "mm-badge-dot-queue"
-              }`}
-            />
+          <div className="topbar-logo">
+            XO<span className="topbar-logo-accent">.</span>
+          </div>
+          {/* Phase pill */}
+          <span
+            className="pill"
+            style={{
+              borderColor: accentColor,
+              color: accentColor,
+              fontSize: 9,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+            }}
+          >
+            {/* Blinking dot — steps(1) like game screen's turnBlink */}
             <span
               style={{
-                color: isError ? "#ef4444" : isFound ? "#14b8a6" : "#f97316",
-                transition: "color 0.4s",
+                display: "inline-block",
+                width: 5,
+                height: 5,
+                background: accentColor,
+                animation: isSearching
+                  ? "mmBlink .8s steps(1) infinite"
+                  : "none",
               }}
-            >
-              {isError ? "Error" : isFound ? "Matched" : "Global Queue"}
-            </span>
-          </div>
-
-          <span className="mm-region">Auto</span>
+            />
+            {phaseLabel}
+          </span>
         </header>
 
-        {/*  Body  */}
-        <main className="mm-body">
-          {/* Loader (arena + chip + timer + phase log) */}
-          <MatchmakingLoader phase={phase} elapsed={elapsed} />
+        {/* BODY */}
+        <main
+          style={{
+            position: "relative",
+            zIndex: 1,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 var(--pad) 24px",
+            overflowY: "auto",
+          }}
+        >
+          {/* Loader component — unchanged */}
+          <MatchmakingLoader phase={phase} />
 
-          {/* Title */}
-          <h2 className={`mm-title ${isError ? "mm-title-error" : ""}`}>
-            {phase === "connecting" && "Connecting..."}
-            {phase === "connected" && "Connected"}
-            {phase === "searching" && "Finding opponent"}
-            {phase === "found" && "Opponent found!"}
-            {phase === "joining" && "Joining match..."}
-            {phase === "ready" && "Ready to play"}
-            {phase === "error" && "Connection failed"}
-          </h2>
-
-          <p className="mm-subtitle">
-            {phase === "connecting" && "Establishing secure connection"}
-            {phase === "connected" && "Entering matchmaking queue"}
-            {phase === "searching" && "Scanning global matchmaking pool"}
-            {phase === "found" && "Locking in your opponent"}
-            {phase === "joining" && "Syncing match state"}
-            {phase === "ready" && "Starting match..."}
-            {phase === "error" && "Could not reach the server"}
-          </p>
-
-          {/* Scan bar — while actively searching / joining */}
-          {isSearching && (
-            <div className="mm-scan-track">
-              <div
-                className="mm-scan-bar"
+          {/* Headline */}
+          <div
+            style={{
+              marginTop: 28,
+              fontFamily: "var(--font-display)",
+              fontSize: 28,
+              fontWeight: 900,
+              letterSpacing: -1,
+              lineHeight: 1,
+              color: isError ? "var(--coral)" : "var(--soft)",
+              textAlign: "center",
+              transition: "color 0.3s steps(3)",
+            }}
+          >
+            {headline}
+            {/* Blinking cursor — exactly like game screen terminals */}
+            {isSearching && (
+              <span
                 style={{
+                  display: "inline-block",
+                  width: 3,
+                  height: "0.85em",
+                  background: accentColor,
+                  marginLeft: 6,
+                  verticalAlign: "middle",
+                  animation: "mmBlink .6s steps(1) infinite",
+                }}
+              />
+            )}
+          </div>
+
+          {/* Subtitle */}
+          <div
+            style={{
+              marginTop: 10,
+              fontFamily: "var(--font-display)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: 2.5,
+              textTransform: "uppercase",
+              color: "var(--muted)",
+              textAlign: "center",
+              minHeight: 18,
+            }}
+          >
+            {subtitle}
+          </div>
+
+          {/* Scan bar — while actively searching/joining */}
+          {isSearching && (
+            <div
+              style={{
+                marginTop: 24,
+                width: "100%",
+                maxWidth: 220,
+                height: 2,
+                background: "var(--surface-hi)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: "40%",
+                  transformOrigin: "left",
+                  animation: "mmBarLoop 1.8s ease-in-out infinite",
                   background:
                     phase === "joining"
-                      ? "linear-gradient(90deg, transparent, #14b8a6, transparent)"
-                      : "linear-gradient(90deg, transparent, #f97316, transparent)",
+                      ? `linear-gradient(90deg, transparent, var(--amber), transparent)`
+                      : `linear-gradient(90deg, transparent, var(--coral), transparent)`,
                 }}
               />
             </div>
           )}
 
-          {/* Opponent card */}
+          {/* Elapsed counter — shown while searching */}
+          {(phase === "searching" || phase === "joining") && (
+            <div
+              style={{
+                marginTop: 14,
+                fontFamily: "var(--font-display)",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 2,
+                color: "var(--muted)",
+                textTransform: "uppercase",
+              }}
+            >
+              {String(Math.floor(elapsed / 60)).padStart(2, "0")}:
+              {String(elapsed % 60).padStart(2, "0")}
+            </div>
+          )}
+
+          {/* Opponent card — found / joining */}
           {(isFound || phase === "joining") && matchInfo && (
-            <div className="mm-opponent-card">
-              <div className="mm-avatar">
-                {matchInfo.opponentName.slice(0, 2).toUpperCase()}
-              </div>
-              <div>
-                <div className="mm-opp-name">{matchInfo.opponentName}</div>
-                <div className="mm-opp-label">
-                  Playing as {matchInfo.iAmCreator ? "O" : "X"}
+            <div
+              style={{
+                marginTop: 28,
+                width: "100%",
+                maxWidth: 320,
+                background: "var(--surface-lo)",
+                border: `1px solid rgba(${accentRgb},0.3)`,
+                boxShadow: `0 0 0 1px rgba(${accentRgb},0.08), 0 16px 40px rgba(0,0,0,0.5)`,
+                animation: "mmOpponentIn 0.38s cubic-bezier(0.34,1.56,0.64,1)",
+                overflow: "hidden",
+              }}
+            >
+              {/* Top accent bar */}
+              <div
+                style={{
+                  height: 3,
+                  background: `linear-gradient(to right, rgba(${accentRgb},0.2), ${accentColor}, rgba(${accentRgb},0.2))`,
+                }}
+              />
+
+              <div style={{ padding: "16px 16px 18px" }}>
+                {/* Label row */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 14,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: 6,
+                      height: 6,
+                      background: accentColor,
+                      animation: "mmBlink .8s steps(1) infinite",
+                    }}
+                  />
+                  <span
+                    style={{
+                      fontFamily: "var(--font-display)",
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: 3,
+                      textTransform: "uppercase",
+                      color: accentColor,
+                    }}
+                  >
+                    Opponent located
+                  </span>
                 </div>
-                {searchDurationMs !== null && (
-                  <div className="mm-opp-found-time">
-                    Found in {fmtDuration(searchDurationMs)}
+
+                {/* Player info row */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  {/* Avatar box — same style as game screen player symbol box */}
+                  <div
+                    style={{
+                      width: 42,
+                      height: 42,
+                      border: `2px solid rgba(${accentRgb},0.4)`,
+                      background: `rgba(${accentRgb},0.08)`,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "var(--font-display)",
+                        fontSize: 16,
+                        fontWeight: 900,
+                        color: accentColor,
+                        textTransform: "uppercase",
+                        letterSpacing: -0.5,
+                      }}
+                    >
+                      {matchInfo.opponentName.slice(0, 2).toUpperCase()}
+                    </span>
                   </div>
-                )}
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      className="t-label"
+                      style={{ color: "var(--muted)", marginBottom: 2 }}
+                    >
+                      Opponent
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: "var(--font-display)",
+                        fontSize: 18,
+                        fontWeight: 800,
+                        lineHeight: 1,
+                        color: "var(--soft)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {matchInfo.opponentName}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      {/* Symbol pill */}
+                      <span
+                        className="pill"
+                        style={{
+                          borderColor: accentColor,
+                          color: accentColor,
+                          fontSize: 8,
+                          padding: "3px 8px",
+                          letterSpacing: 2,
+                        }}
+                      >
+                        ▸ Playing {matchInfo.iAmCreator ? "O" : "X"}
+                      </span>
+                      {/* Found-in pill */}
+                      {searchDurationMs !== null && (
+                        <span
+                          className="pill"
+                          style={{
+                            borderColor: "var(--rim)",
+                            color: "var(--muted)",
+                            fontSize: 8,
+                            padding: "3px 8px",
+                            letterSpacing: 1.5,
+                          }}
+                        >
+                          {fmtDuration(searchDurationMs)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
 
           {/* Error hint */}
           {isError && (
-            <p className="mm-error-hint">
-              Could not reach the matchmaking server.
+            <p
+              style={{
+                marginTop: 16,
+                fontFamily: "var(--font-display)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 2,
+                textTransform: "uppercase",
+                color: "var(--muted)",
+                textAlign: "center",
+                maxWidth: 240,
+                lineHeight: 1.8,
+                animation: "mmFadeSlideIn 0.3s ease-out",
+              }}
+            >
+              Could not reach the server
               <br />
-              Check your connection and try again.
+              Check connection and retry
             </p>
           )}
         </main>
 
-        {/*  Footer  */}
-        <footer className="mm-footer">
+        {/* FOOTER */}
+        <footer
+          style={{
+            padding: "12px var(--pad)",
+            flexShrink: 0,
+            position: "relative",
+            zIndex: 2,
+          }}
+        >
+          <div className="prog-bar" style={{ marginBottom: 12 }} />
           <button
-            className={`mm-cancel-btn ${isError ? "mm-btn-error" : "mm-btn-queue"}`}
+            className="btn btn-ghost btn-full"
             onClick={handleCancel}
+            type="button"
           >
-            {isError ? "Go back" : isFound ? "Cancel" : "Cancel search"}
+            {isError ? "← Go back" : isFound ? "← Cancel" : "← Cancel search"}
           </button>
         </footer>
       </div>
