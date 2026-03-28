@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/global.d.ts","./src/main.tsx","./src/vite-env.d.ts","./src/config/index.ts","./src/features/game/gamescreen.tsx","./src/features/game/usegame.ts","./src/features/landing/landingscreen.tsx","./src/services/nakamaclient.ts","./src/utils/usernamegenerator.ts"],"version":"5.9.3"}

@@ -1,0 +1,33 @@
+@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Pixelify+Sans:wght@400;700&display=swap");
+body {
+  margin: 0;
+  background: #0f172a;
+  color: #22c55e;
+  font-family: "Pixelify Sans", sans-serif;
+}
+
+body {
+  border: 5px solid red;
+}
+
+* {
+  font-family: "Pixelify Sans", sans-serif;
+}
+
+h1, .pixel-title {
+  font-family: "Press Start 2P", cursive;
+}
+
+button {
+  font-family: "Pixelify Sans", sans-serif;
+  border: 2px solid #22c55e;
+  background: #020617;
+  color: #22c55e;
+  padding: 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #22c55e;
+  color: #000;
+}

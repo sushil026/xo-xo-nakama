@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+
+# Env
+.env
+
+# Logs
+*.log
+
+# Mac
+.DS_Store
+
+# Docker
+*.pid
+
+# Vite
+.vite
+
+# Build artifacts
+apps/web/dist
