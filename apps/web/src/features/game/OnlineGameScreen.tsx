@@ -1,28 +1,15 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { connect, getSocket } from "../../services/nakamaClient";
+import {
+  connect,
+  recordMatchAnalytics,
+  getSocket,
+  type StoredMatch,
+} from "../../services/nakamaClient";
 
 //  Constants
 const OP_STATE = 1;
 const TIMER_SECS = 30;
-
-//  Server state shape
-interface ServerPlayer {
-  userId: string;
-  symbol: "X" | "O";
-}
-interface ServerState {
-  board: (string | null)[];
-  players: ServerPlayer[];
-  turn: string | null;
-  winner: string | null;
-  moves: number[];
-  matchId: string;
-}
-
-//  UI types
-type Player = "X" | "O";
-type Cell = Player | null;
-type Result = Player | "draw" | null;
+const NUM_BARS = 10;
 
 const WIN_LINES = [
   [0, 1, 2],
@@ -47,6 +34,48 @@ const CELL_LABEL = [
   "bot-3",
 ] as const;
 
+//  Types
+type Player = "X" | "O";
+type Cell = Player | null;
+type Result = Player | "draw" | null;
+type EndReason = "win" | "draw" | "timeout" | "forfeit";
+
+interface ServerPlayer {
+  userId: string;
+  symbol: Player;
+  username?: string;
+}
+
+interface ServerState {
+  board: (string | null)[];
+  players: ServerPlayer[];
+  turn: string | null;
+  winner: string | null;
+  moves: number[];
+  matchId: string;
+}
+
+/**
+ * Derived client-side truth: computed once per server state update.
+ * This is the single source of truth for all display logic.
+ */
+interface DerivedState {
+  cells: Cell[];
+  mySymbol: Player | null; // null until server confirms
+  oppSymbol: Player | null;
+  isMyTurn: boolean;
+  result: Result; // null = game on
+  iWon: boolean;
+  isDraw: boolean;
+  winLine: readonly number[] | null;
+  myMoves: string[];
+  oppMoves: string[];
+  waiting: boolean; // < 2 players joined
+  endReason: EndReason | null;
+  timeoutDetected: boolean;
+}
+
+//  Pure helpers
 function checkWinLine(b: Cell[]): readonly number[] | null {
   for (const line of WIN_LINES) {
     const [a, b1, c] = line;
@@ -55,7 +84,118 @@ function checkWinLine(b: Cell[]): readonly number[] | null {
   return null;
 }
 
-//  Logging
+function opposite(sym: Player): Player {
+  return sym === "X" ? "O" : "X";
+}
+
+/**
+ * Derive all display state from raw server state + my userId.
+ * This is the ONLY place symbols are resolved — all comparisons
+ * go through `mySymbol` read from ss.players, never from props.
+ */
+function deriveState(
+  ss: ServerState,
+  myId: string | null,
+  prevEndReason: EndReason | null,
+  forfeitActive: boolean,
+): DerivedState {
+  const cells = ss.board.map((v) =>
+    v === "X" || v === "O" ? (v as Player) : null,
+  ) as Cell[];
+
+  const waiting = ss.players.length < 2;
+
+  // Server-authoritative symbol resolution
+  const myEntry = myId ? ss.players.find((p) => p.userId === myId) : null;
+  const oppEntry = myId ? ss.players.find((p) => p.userId !== myId) : null;
+  const mySymbol: Player | null = myEntry?.symbol ?? null;
+  const oppSymbol: Player | null =
+    oppEntry?.symbol ?? (mySymbol ? opposite(mySymbol) : null);
+
+  const isMyTurn = !!myId && ss.turn === myId && !ss.winner;
+
+  // Move attribution: X always moves on even indices (0,2,4…), O on odd
+  const xSet = new Set<number>();
+  const oSet = new Set<number>();
+  ss.moves.forEach((idx, i) => {
+    if (i % 2 === 0) xSet.add(idx);
+    else oSet.add(idx);
+  });
+  const mySet = mySymbol === "X" ? xSet : oSet;
+  const oppSet = mySymbol === "X" ? oSet : xSet;
+
+  const myMoves = ss.moves
+    .filter((idx) => mySet.has(idx))
+    .map((idx) => CELL_LABEL[idx] as string);
+  const oppMoves = ss.moves
+    .filter((idx) => oppSet.has(idx))
+    .map((idx) => CELL_LABEL[idx] as string);
+
+  let result: Result = null;
+  let iWon = false;
+  let isDraw = false;
+  let winLine: readonly number[] | null = null;
+  let endReason: EndReason | null = prevEndReason;
+  let timeoutDetected = false;
+
+  if (ss.winner) {
+    isDraw = ss.winner === "draw";
+    iWon = !isDraw && mySymbol !== null && ss.winner === mySymbol;
+    result = isDraw ? "draw" : iWon ? mySymbol! : oppSymbol!;
+    winLine = isDraw ? null : checkWinLine(cells);
+
+    // Determine end reason if not already set by a client-side forfeit
+    if (!forfeitActive) {
+      const boardFull = ss.board.every((c) => c !== null);
+      const hasWinLine = winLine !== null;
+
+      if (isDraw) {
+        endReason = "draw";
+      } else if (!boardFull && !hasWinLine) {
+        // Cells empty + no winning line = timeout
+        timeoutDetected = true;
+        endReason = "timeout";
+      } else {
+        endReason = "win";
+      }
+    }
+  }
+
+  return {
+    cells,
+    mySymbol,
+    oppSymbol,
+    isMyTurn,
+    result,
+    iWon,
+    isDraw,
+    winLine,
+    myMoves,
+    oppMoves,
+    waiting,
+    endReason,
+    timeoutDetected,
+  };
+}
+
+function decodeServerState(raw: unknown): ServerState {
+  let str: string;
+  if (typeof raw === "string") {
+    try {
+      const bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
+      str = new TextDecoder().decode(bytes);
+    } catch {
+      str = raw;
+    }
+  } else if (raw instanceof Uint8Array) {
+    str = new TextDecoder().decode(raw);
+  } else {
+    str = new TextDecoder().decode(new Uint8Array(raw as ArrayBuffer));
+  }
+  return JSON.parse(str) as ServerState;
+}
+
+//  Logger
 const ts = () => new Date().toISOString().slice(11, 23);
 const log = {
   info: (m: string, ...d: unknown[]) =>
@@ -64,9 +204,9 @@ const log = {
     console.warn(`%c[XO ${ts()}] ${m}`, "color:#f59e0b;font-weight:600", ...d),
   error: (m: string, ...d: unknown[]) =>
     console.error(`%c[XO ${ts()}] ${m}`, "color:#ef4444;font-weight:600", ...d),
-  state: (label: string, ss: ServerState, myId: string | null) => {
+  state: (ss: ServerState, myId: string | null) => {
     console.groupCollapsed(
-      `%c[XO ${ts()}] 📦 ${label}`,
+      `%c[XO ${ts()}] 📦 SERVER STATE`,
       "color:#818cf8;font-weight:600",
     );
     console.log("board   :", ss.board.map((c, i) => c ?? `_${i}`).join(" | "));
@@ -86,63 +226,58 @@ const log = {
   },
 };
 
-//  Decode binary
-function decodeServerState(raw: unknown): ServerState {
-  let str: string;
-  if (typeof raw === "string") {
-    try {
-      const binaryStr = atob(raw);
-      const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
-      str = new TextDecoder().decode(bytes);
-    } catch {
-      str = raw;
-    }
-  } else if (raw instanceof Uint8Array) {
-    str = new TextDecoder().decode(raw);
-  } else {
-    str = new TextDecoder().decode(new Uint8Array(raw as ArrayBuffer));
-  }
-  return JSON.parse(str) as ServerState;
-}
-
 //  Props
 interface Props {
   matchId: string;
   opponentName: string;
-  iAmX: boolean;
+  iAmX: boolean; // hint only — server state is authoritative
   onBack: () => void;
 }
 
-//  Component
+//
+// Main Component
+//
 export default function OnlineGameScreen({
   matchId,
   opponentName,
   iAmX,
   onBack,
 }: Props) {
-  const mySymbol: Player = iAmX ? "X" : "O";
-  const oppSymbol: Player = iAmX ? "O" : "X";
+  //  State
+  const [derived, setDerived] = useState<DerivedState>({
+    cells: Array(9).fill(null),
+    mySymbol: iAmX ? "X" : "O", // prop hint; overwritten on first server msg
+    oppSymbol: iAmX ? "O" : "X",
+    isMyTurn: false,
+    result: null,
+    iWon: false,
+    isDraw: false,
+    winLine: null,
+    myMoves: [],
+    oppMoves: [],
+    waiting: true,
+    endReason: null,
+    timeoutDetected: false,
+  });
 
-  const [board, setBoard] = useState<Cell[]>(Array(9).fill(null));
-  const [isMyTurn, setIsMyTurn] = useState(false);
-  const [result, setResult] = useState<Result>(null);
-  const [winLine, setWinLine] = useState<readonly number[] | null>(null);
-  const [myMoves, setMyMoves] = useState<string[]>([]);
-  const [oppMoves, setOppMoves] = useState<string[]>([]);
   const [connLost, setConnLost] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
-  const [waiting, setWaiting] = useState(true);
   const [timeLeft, setTimeLeft] = useState(TIMER_SECS);
   const [forfeitMsg, setForfeitMsg] = useState<string | null>(null);
   const [timeoutMsg, setTimeoutMsg] = useState<string | null>(null);
 
-  const boardRef = useRef<Cell[]>(Array(9).fill(null));
-  const myUserIdRef = useRef<string | null>(null);
+  //  Refs
   const mountedRef = useRef(true);
+  const myUserIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const isMyTurnRef = useRef(false);
-  const resultRef = useRef<Result>(null);
-  const waitingRef = useRef(true);
+  const derivedRef = useRef(derived); // always in sync with state
+  const analyticsRecordedRef = useRef(false);
+  const forfeitActiveRef = useRef(false);
+
+  // Keep derivedRef in sync
+  useEffect(() => {
+    derivedRef.current = derived;
+  }, [derived]);
 
   //  Timer
   const clearTimer = useCallback(() => {
@@ -159,7 +294,6 @@ export default function OnlineGameScreen({
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearTimer();
-          // Auto-forfeit on timeout — only if still my turn and game ongoing
           return 0;
         }
         return prev - 1;
@@ -167,71 +301,64 @@ export default function OnlineGameScreen({
     }, 1000);
   }, [clearTimer]);
 
-  //  Apply server state
+  //  Analytics
+  const recordAnalytics = useCallback((ss: ServerState, d: DerivedState) => {
+    if (analyticsRecordedRef.current || !d.endReason) return;
+    analyticsRecordedRef.current = true;
+    connect().then(({ session }) => {
+      const storedMatch: StoredMatch = {
+        matchId: ss.matchId,
+        players: ss.players,
+        moves: ss.moves,
+        winner: ss.winner,
+        endReason: d.endReason!,
+        openingCell: ss.moves.length > 0 ? ss.moves[0] : null,
+        createdAt: Date.now(),
+      };
+      recordMatchAnalytics(session, storedMatch, d.mySymbol ?? "X").catch(
+        () => {},
+      );
+    });
+  }, []);
+
+  //  Apply server state (single source of truth)
   const applyServerState = useCallback(
     (ss: ServerState) => {
       const myId = myUserIdRef.current;
-      log.state("SERVER STATE", ss, myId);
+      log.state(ss, myId);
 
-      const cells = ss.board.map((v) =>
-        v === "X" || v === "O" ? (v as Player) : null,
-      ) as Cell[];
-      boardRef.current = cells;
-      setBoard(cells);
+      const next = deriveState(
+        ss,
+        myId,
+        derivedRef.current.endReason,
+        forfeitActiveRef.current,
+      );
 
-      const isWaiting = ss.players.length < 2;
-      waitingRef.current = isWaiting;
-      setWaiting(isWaiting);
-      if (isWaiting) {
-        log.warn(`Only ${ss.players.length}/2 players`);
+      setDerived(next);
+
+      if (next.waiting) {
+        log.warn(`Only ${ss.players.length}/2 players — waiting`);
         return;
       }
 
-      const myTurn = !!myId && ss.turn === myId && !ss.winner;
-      isMyTurnRef.current = myTurn;
-      setIsMyTurn(myTurn);
-
-      setMyMoves(
-        ss.moves
-          .map((idx) => (cells[idx] === mySymbol ? CELL_LABEL[idx] : null))
-          .filter((x): x is string => x !== null),
-      );
-      setOppMoves(
-        ss.moves
-          .map((idx) => (cells[idx] === oppSymbol ? CELL_LABEL[idx] : null))
-          .filter((x): x is string => x !== null),
-      );
-
-      if (ss.winner) {
+      if (next.result) {
         clearTimer();
 
-        const boardFull = ss.board.every((c) => c !== null);
-        const lastMoveWasWinning = checkWinLine(cells) !== null;
-
-        // Timeout: game ended with empty cells and no winning line
-        if (!boardFull && !lastMoveWasWinning && ss.winner !== "draw") {
-          const iWonByTimeout = ss.winner === mySymbol;
-          setTimeoutMsg(
-            iWonByTimeout
-              ? "Opponent ran out of time — you win!"
-              : "You ran out of time — opponent wins",
-          );
+        // Set human-readable timeout message
+        if (next.timeoutDetected) {
+          const msg = next.iWon
+            ? "Opponent ran out of time — you win!"
+            : "You ran out of time — opponent wins";
+          setTimeoutMsg(msg);
         }
 
-        resultRef.current =
-          ss.winner === "draw"
-            ? "draw"
-            : ss.winner === mySymbol
-              ? mySymbol
-              : oppSymbol;
-        setResult(resultRef.current);
-        if (resultRef.current !== "draw") setWinLine(checkWinLine(cells));
+        recordAnalytics(ss, next);
       } else {
-        // Restart timer on every new state (turn changed)
+        // Game still live — (re)start turn timer
         startTimer();
       }
     },
-    [mySymbol, oppSymbol, clearTimer, startTimer],
+    [clearTimer, startTimer, recordAnalytics],
   );
 
   //  Socket wiring
@@ -248,47 +375,43 @@ export default function OnlineGameScreen({
         if (!mountedRef.current) return;
 
         myUserIdRef.current = session.user_id ?? null;
-        log.info(
-          `Connected — userId=${session.user_id?.slice(0, 8)} symbol=${mySymbol}`,
-        );
+        log.info(`Connected — userId=${session.user_id?.slice(0, 8)}`);
 
         setConnLost(false);
         setReconnecting(false);
 
         socket.onmatchdata = (data) => {
           if (!mountedRef.current) return;
-          log.info(`onmatchdata op=${data.op_code}`);
-
           if (data.op_code !== OP_STATE) {
             log.warn(`Unknown op_code ${data.op_code} — ignoring`);
             return;
           }
-
-          let ss: ServerState;
           try {
-            ss = decodeServerState(data.data);
+            applyServerState(decodeServerState(data.data));
           } catch (e) {
-            log.error("Decode failed", e);
-            return;
+            log.error("Decode/apply failed", e);
           }
-
-          applyServerState(ss);
         };
 
         socket.ondisconnect = () => {
           if (!mountedRef.current) return;
-          log.warn("Disconnected — network loss triggers forfeit");
+          log.warn("Disconnected");
           setConnLost(true);
           clearTimer();
 
-          // Network loss = forfeit, opponent wins
-          if (!resultRef.current) {
+          if (!derivedRef.current.result) {
+            forfeitActiveRef.current = true;
             setForfeitMsg("Connection lost — opponent wins");
-            resultRef.current = oppSymbol;
-            setResult(oppSymbol);
+            // Optimistically mark loss; server will confirm when reconnected
+            setDerived((prev) => ({
+              ...prev,
+              result: prev.oppSymbol,
+              iWon: false,
+              isDraw: false,
+              endReason: "forfeit",
+            }));
           }
 
-          // Still attempt reconnect in background for graceful re-entry
           setReconnecting(true);
           setTimeout(() => {
             if (!mountedRef.current) return;
@@ -297,7 +420,7 @@ export default function OnlineGameScreen({
           }, 2000);
         };
 
-        // Request resync
+        // Request resync immediately
         try {
           socket.sendMatchState(
             matchId,
@@ -321,16 +444,19 @@ export default function OnlineGameScreen({
       clearTimer();
       log.info("Unmounting");
     };
-  }, [matchId, iAmX, mySymbol, applyServerState, clearTimer, oppSymbol]);
+  }, [matchId, iAmX, applyServerState, clearTimer]);
 
   //  Send move
   const handleMove = (idx: number) => {
-    if (board[idx] || result || !isMyTurn || connLost || waiting) return;
+    const { cells, result, isMyTurn, waiting } = derivedRef.current;
+    if (cells[idx] || result || !isMyTurn || connLost || waiting) return;
     log.info(`Move: cell ${idx}`);
     try {
-      const socket = getSocket();
-      const payload = new TextEncoder().encode(JSON.stringify({ index: idx }));
-      socket.sendMatchState(matchId, OP_STATE, payload);
+      getSocket().sendMatchState(
+        matchId,
+        OP_STATE,
+        new TextEncoder().encode(JSON.stringify({ index: idx })),
+      );
     } catch (e) {
       log.error("sendMatchState failed", e);
       setConnLost(true);
@@ -339,29 +465,52 @@ export default function OnlineGameScreen({
 
   //  Forfeit
   const handleForfeit = () => {
+    if (derivedRef.current.result) return;
     log.info("Player forfeited");
     clearTimer();
+    forfeitActiveRef.current = true;
+
     try {
-      const socket = getSocket();
-      const payload = new TextEncoder().encode(
-        JSON.stringify({ forfeit: true }),
+      getSocket().sendMatchState(
+        matchId,
+        OP_STATE,
+        new TextEncoder().encode(JSON.stringify({ forfeit: true })),
       );
-      socket.sendMatchState(matchId, OP_STATE, payload);
     } catch (e) {
       log.error("Forfeit send failed", e);
     }
+
     setForfeitMsg("You forfeited — opponent wins");
-    resultRef.current = oppSymbol;
-    setResult(oppSymbol);
-    // Navigate back after brief delay so result card shows
+    setDerived((prev) => ({
+      ...prev,
+      result: prev.oppSymbol,
+      iWon: false,
+      isDraw: false,
+      endReason: "forfeit",
+    }));
+
     setTimeout(onBack, 3000);
   };
 
-  //  Derived
+  //  Derived display values
+  const {
+    cells,
+    mySymbol,
+    oppSymbol,
+    isMyTurn,
+    result,
+    iWon,
+    isDraw,
+    winLine,
+    myMoves,
+    oppMoves,
+    waiting,
+  } = derived;
+
   const timerLow = timeLeft <= 10 && isMyTurn && !result && !waiting;
   const activeColor = isMyTurn ? "var(--coral)" : "var(--amber)";
-  const NUM_BARS = 10;
 
+  //  Render
   return (
     <div
       className="screen"
@@ -389,7 +538,7 @@ export default function OnlineGameScreen({
         O
       </span>
 
-      {/* TOPBAR */}
+      {/* Top bar */}
       <header className="topbar" style={{ flexShrink: 0 }}>
         <button className="btn btn-ghost btn-sm" onClick={onBack} type="button">
           ←
@@ -416,112 +565,37 @@ export default function OnlineGameScreen({
         </Banner>
       )}
 
-      {/* MY ROW */}
+      {/* My row */}
       <PlayerRow
         label="You"
-        symbol={mySymbol}
+        symbol={mySymbol ?? (iAmX ? "X" : "O")}
         isMe={true}
-        active={isMyTurn}
+        active={isMyTurn && !waiting}
         log={myMoves}
         result={result}
-        winner={result === mySymbol}
+        winner={iWon}
+        isDraw={isDraw}
       />
 
-      {/* TURN STRIP + TIMER */}
+      {/* Turn strip + timer */}
       {!result && !waiting && (
         <>
-          <div
-            style={{
-              flexShrink: 0,
-              background: isMyTurn
-                ? "rgba(255,85,64,0.06)"
-                : "rgba(240,160,80,0.06)",
-              borderBottom: `1px solid ${isMyTurn ? "rgba(255,85,64,0.2)" : "rgba(240,160,80,0.2)"}`,
-              borderTop: `1px solid ${isMyTurn ? "rgba(255,85,64,0.2)" : "rgba(240,160,80,0.2)"}`,
-              padding: "6px var(--pad)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              transition: "background 120ms steps(2)",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 6,
-                  height: 6,
-                  background: activeColor,
-                  animation: "turnBlink .8s steps(1) infinite",
-                }}
-              />
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  letterSpacing: 2.5,
-                  textTransform: "uppercase",
-                  color: activeColor,
-                }}
-              >
-                {isMyTurn ? "Your move" : `${opponentName}'s move`}
-              </span>
-            </div>
-            {/* Timer digit */}
-            <span
-              style={{
-                fontFamily: "var(--font-display)",
-                fontSize: 13,
-                fontWeight: 800,
-                letterSpacing: -0.5,
-                color: timerLow ? "var(--coral)" : "var(--soft)",
-                animation: timerLow
-                  ? "timerPulse .4s steps(2) infinite"
-                  : "none",
-              }}
-            >
-              {String(timeLeft).padStart(2, "0")}s
-            </span>
-          </div>
-
-          {/* Segmented timer bar */}
-          <div
-            style={{
-              flexShrink: 0,
-              padding: "5px var(--pad)",
-              background: "var(--surface-lo)",
-              borderBottom: "1px solid var(--rim)",
-              display: "flex",
-              gap: 3,
-            }}
-          >
-            {Array.from({ length: NUM_BARS }).map((_, i) => {
-              const filled = i < Math.ceil((timeLeft / TIMER_SECS) * NUM_BARS);
-              const opacity = filled
-                ? timerLow
-                  ? 1 - (i / NUM_BARS) * 0.2 // stay vivid when urgent
-                  : 0.45 + (1 - i / NUM_BARS) * 0.45 // fade left→right
-                : 0.15;
-              return (
-                <div
-                  key={i}
-                  style={{
-                    flex: 1,
-                    height: 14,
-                    borderRadius: 2,
-                    background: filled ? activeColor : "var(--surface-hi)",
-                    opacity,
-                    transition: "opacity 300ms ease, background 60ms steps(1)",
-                  }}
-                />
-              );
-            })}
-          </div>
+          <TurnStrip
+            isMyTurn={isMyTurn}
+            opponentName={opponentName}
+            timeLeft={timeLeft}
+            timerLow={timerLow}
+            activeColor={activeColor}
+          />
+          <TimerBars
+            timeLeft={timeLeft}
+            timerLow={timerLow}
+            activeColor={activeColor}
+          />
         </>
       )}
 
-      {/* BOARD */}
+      {/* Board */}
       <div
         style={{
           flex: 1,
@@ -547,6 +621,7 @@ export default function OnlineGameScreen({
           <Corner pos="tr" color={activeColor} dim={!!result} />
           <Corner pos="bl" color={activeColor} dim={!!result} />
           <Corner pos="br" color={activeColor} dim={!!result} />
+
           <div
             style={{
               display: "grid",
@@ -562,13 +637,15 @@ export default function OnlineGameScreen({
               transition: "box-shadow 200ms steps(3)",
             }}
           >
-            {board.map((cell, i) => (
+            {cells.map((cell, i) => (
               <BoardCell
                 key={i}
                 cell={cell}
                 isWin={winLine?.includes(i) ?? false}
                 hoverMark={
-                  isMyTurn && !cell && !result && !waiting ? mySymbol : null
+                  isMyTurn && !cell && !result && !waiting
+                    ? (mySymbol ?? null)
+                    : null
                 }
                 onClick={() => handleMove(i)}
                 disabled={
@@ -581,30 +658,32 @@ export default function OnlineGameScreen({
 
         {result && (
           <ResultCard
-            result={result}
-            mySymbol={mySymbol}
+            iWon={iWon}
+            isDraw={isDraw}
+            mySymbol={mySymbol ?? (iAmX ? "X" : "O")}
             oppLabel={opponentName}
             forfeitMsg={forfeitMsg}
             timeoutMsg={timeoutMsg}
-            board={board}
+            board={cells}
             winLine={winLine}
             onBack={onBack}
           />
         )}
       </div>
 
-      {/* OPPONENT ROW */}
+      {/* Opponent row */}
       <PlayerRow
         label={opponentName}
-        symbol={oppSymbol}
+        symbol={oppSymbol ?? (iAmX ? "O" : "X")}
         isMe={false}
         active={!result && !isMyTurn && !waiting}
         log={oppMoves}
         result={result}
-        winner={result === oppSymbol}
+        winner={!!result && !iWon && !isDraw}
+        isDraw={isDraw}
       />
 
-      {/* FOOTER */}
+      {/* Footer */}
       <footer style={{ padding: "12px var(--pad)", flexShrink: 0 }}>
         <div className="prog-bar" style={{ marginBottom: 12 }} />
         <button
@@ -618,16 +697,19 @@ export default function OnlineGameScreen({
       </footer>
 
       <style>{`
-        @keyframes turnBlink  { 0%,100%{opacity:1} 50%{opacity:0} }
-        @keyframes cellIn     { from{transform:scale(.4);opacity:0} to{transform:scale(1);opacity:1} }
-        @keyframes resultSlide{ from{transform:translateY(32px);opacity:0} to{transform:translateY(0);opacity:1} }
-        @keyframes scanline   { from{transform:translateY(-100%)} to{transform:translateY(100%)} }
-        @keyframes timerPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes urgencyPulse { 0%,100%{box-shadow:0 0 0 0 rgba(255,85,64,0)} 50%{box-shadow:0 0 0 8px rgba(255,85,64,0.12)} }
+        @keyframes turnBlink    { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes cellIn       { from{transform:scale(.4);opacity:0} to{transform:scale(1);opacity:1} }
+        @keyframes resultSlide  { from{transform:translateY(32px);opacity:0} to{transform:translateY(0);opacity:1} }
+        @keyframes scanline     { from{transform:translateY(-100%)} to{transform:translateY(100%)} }
+        @keyframes timerPulse   { 0%,100%{opacity:1} 50%{opacity:0.4} }
       `}</style>
     </div>
   );
 }
+
+//
+// Sub-components
+//
 
 //  Banner
 function Banner({
@@ -677,9 +759,123 @@ function Banner({
   );
 }
 
-//  Result Card
+//  Turn strip
+function TurnStrip({
+  isMyTurn,
+  opponentName,
+  timeLeft,
+  timerLow,
+  activeColor,
+}: {
+  isMyTurn: boolean;
+  opponentName: string;
+  timeLeft: number;
+  timerLow: boolean;
+  activeColor: string;
+}) {
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        background: isMyTurn ? "rgba(255,85,64,0.06)" : "rgba(240,160,80,0.06)",
+        borderBottom: `1px solid ${isMyTurn ? "rgba(255,85,64,0.2)" : "rgba(240,160,80,0.2)"}`,
+        borderTop: `1px solid ${isMyTurn ? "rgba(255,85,64,0.2)" : "rgba(240,160,80,0.2)"}`,
+        padding: "6px var(--pad)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        transition: "background 120ms steps(2)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: 6,
+            height: 6,
+            background: activeColor,
+            animation: "turnBlink .8s steps(1) infinite",
+          }}
+        />
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: 2.5,
+            textTransform: "uppercase",
+            color: activeColor,
+          }}
+        >
+          {isMyTurn ? "Your move" : `${opponentName}'s move`}
+        </span>
+      </div>
+      <span
+        style={{
+          fontFamily: "var(--font-display)",
+          fontSize: 13,
+          fontWeight: 800,
+          letterSpacing: -0.5,
+          color: timerLow ? "var(--coral)" : "var(--soft)",
+          animation: timerLow ? "timerPulse .4s steps(2) infinite" : "none",
+        }}
+      >
+        {String(timeLeft).padStart(2, "0")}s
+      </span>
+    </div>
+  );
+}
+
+//  Timer bars
+function TimerBars({
+  timeLeft,
+  timerLow,
+  activeColor,
+}: {
+  timeLeft: number;
+  timerLow: boolean;
+  activeColor: string;
+}) {
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        padding: "5px var(--pad)",
+        background: "var(--surface-lo)",
+        borderBottom: "1px solid var(--rim)",
+        display: "flex",
+        gap: 3,
+      }}
+    >
+      {Array.from({ length: NUM_BARS }).map((_, i) => {
+        const filled = i < Math.ceil((timeLeft / TIMER_SECS) * NUM_BARS);
+        const opacity = filled
+          ? timerLow
+            ? 1 - (i / NUM_BARS) * 0.2
+            : 0.45 + (1 - i / NUM_BARS) * 0.45
+          : 0.15;
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              height: 14,
+              borderRadius: 2,
+              background: filled ? activeColor : "var(--surface-hi)",
+              opacity,
+              transition: "opacity 300ms ease, background 60ms steps(1)",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+//  Result card
 function ResultCard({
-  result,
+  iWon,
+  isDraw,
   mySymbol,
   oppLabel,
   forfeitMsg,
@@ -688,7 +884,8 @@ function ResultCard({
   winLine,
   onBack,
 }: {
-  result: Result;
+  iWon: boolean;
+  isDraw: boolean;
   mySymbol: Player;
   oppLabel: string;
   forfeitMsg: string | null;
@@ -697,8 +894,6 @@ function ResultCard({
   winLine: readonly number[] | null;
   onBack: () => void;
 }) {
-  const isDraw = result === "draw";
-  const iWon = result === mySymbol;
   const winColor = iWon
     ? "var(--coral)"
     : isDraw
@@ -706,6 +901,26 @@ function ResultCard({
       : "var(--amber)";
   const winRgb = iWon ? "255,85,64" : isDraw ? "140,140,130" : "240,160,80";
   const headline = isDraw ? "DRAW" : iWon ? "VICTORY" : "DEFEAT";
+
+  const subLabel = isDraw
+    ? "STALEMATE"
+    : forfeitMsg
+      ? "FORFEIT"
+      : timeoutMsg
+        ? "TIMEOUT"
+        : iWon
+          ? "CHAMPION"
+          : "ELIMINATED";
+
+  const bodyText = forfeitMsg
+    ? forfeitMsg
+    : timeoutMsg
+      ? timeoutMsg
+      : isDraw
+        ? "Neither player claimed victory."
+        : iWon
+          ? `You defeated ${oppLabel}.`
+          : `${oppLabel} wins this round.`;
 
   return (
     <div
@@ -778,15 +993,7 @@ function ResultCard({
               marginBottom: 14,
             }}
           >
-            {isDraw
-              ? "STALEMATE"
-              : forfeitMsg
-                ? "FORFEIT"
-                : timeoutMsg
-                  ? "TIMEOUT"
-                  : iWon
-                    ? "CHAMPION"
-                    : "ELIMINATED"}
+            {subLabel}
           </div>
 
           {/* Headline */}
@@ -811,19 +1018,11 @@ function ResultCard({
               className="t-body"
               style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}
             >
-              {forfeitMsg
-                ? forfeitMsg
-                : timeoutMsg
-                  ? timeoutMsg
-                  : isDraw
-                    ? "Neither player claimed victory."
-                    : iWon
-                      ? `You defeated ${oppLabel}.`
-                      : `${oppLabel} wins this round.`}
+              {bodyText}
             </p>
           </div>
 
-          {/* Mini board */}
+          {/* Mini board replay */}
           <div
             style={{
               margin: "4px auto 16px",
@@ -908,7 +1107,6 @@ function ResultCard({
                       />
                     </svg>
                   )}
-                  {/* Win line highlight dot */}
                   {isWin && (
                     <div
                       style={{
@@ -1089,6 +1287,7 @@ function Corner({
         : pos === "bl"
           ? { bottom: -14, left: -14, transform: "scaleY(-1)" }
           : { bottom: -14, right: -14, transform: "scale(-1,-1)" };
+
   return (
     <div
       style={{
@@ -1107,7 +1306,7 @@ function Corner({
   );
 }
 
-//  Player Row
+//  Player row
 function PlayerRow({
   label,
   symbol,
@@ -1116,6 +1315,7 @@ function PlayerRow({
   log,
   result,
   winner,
+  isDraw,
 }: {
   label: string;
   symbol: Player;
@@ -1124,9 +1324,11 @@ function PlayerRow({
   log: string[];
   result: Result;
   winner: boolean;
+  isDraw: boolean;
 }) {
   const color = symbol === "X" ? "var(--coral)" : "var(--amber)";
   const logRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (logRef.current) logRef.current.scrollLeft = logRef.current.scrollWidth;
   }, [log]);
@@ -1165,11 +1367,11 @@ function PlayerRow({
           style={{
             width: 36,
             height: 36,
+            flexShrink: 0,
             border: `2px solid ${active || winner ? color : "var(--rim)"}`,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            flexShrink: 0,
             background: active
               ? symbol === "X"
                 ? "rgba(255,85,64,.08)"
@@ -1206,6 +1408,7 @@ function PlayerRow({
             </svg>
           )}
         </div>
+
         <div>
           <div className="t-label" style={{ color: "var(--muted)" }}>
             {isMe ? "You" : "Opponent"}
@@ -1226,6 +1429,7 @@ function PlayerRow({
             {label}
           </div>
         </div>
+
         {winner && (
           <span
             className="pill"
@@ -1238,6 +1442,20 @@ function PlayerRow({
             }}
           >
             ▸ Winner
+          </span>
+        )}
+        {isDraw && result === "draw" && (
+          <span
+            className="pill"
+            style={{
+              borderColor: "var(--muted)",
+              color: "var(--soft)",
+              fontSize: 8,
+              padding: "3px 8px",
+              letterSpacing: 2,
+            }}
+          >
+            Draw
           </span>
         )}
         {!result && active && (
@@ -1256,22 +1474,9 @@ function PlayerRow({
             ▸ Active
           </span>
         )}
-        {result === "draw" && (
-          <span
-            className="pill"
-            style={{
-              borderColor: "var(--muted)",
-              color: "var(--soft)",
-              fontSize: 8,
-              padding: "3px 8px",
-              letterSpacing: 2,
-            }}
-          >
-            Draw
-          </span>
-        )}
       </div>
 
+      {/* Move log */}
       <div
         ref={logRef}
         style={{

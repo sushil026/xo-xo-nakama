@@ -1,10 +1,14 @@
 import { useState, useEffect } from "react";
+
 import LandingScreen from "./features/landing/LandingScreen";
 import HomeScreen from "./features/home/HomeScreen";
 import ModesScreen from "./features/modes/ModesScreen";
 import MatchmakingScreen from "./features/matchmaking/MatchmakingScreen";
 import LocalGameScreen from "./features/game/LocalGame";
 import OnlineGameScreen from "./features/game/OnlineGameScreen";
+import ProfileScreen from "./features/profile/ProfileScreen";
+import MatchHistoryScreen from "./features/profile/MatchHistoryScreen";
+import LeaderboardScreen from "./features/leaderboard/LeaderboardScreen";
 
 type Screen =
   | "landing"
@@ -12,7 +16,10 @@ type Screen =
   | "modes"
   | "matchmaking"
   | "game"
-  | "local-game";
+  | "local-game"
+  | "profile"
+  | "matchHistory"
+  | "leaderboard";
 
 interface MatchState {
   matchId: string;
@@ -20,7 +27,6 @@ interface MatchState {
   iAmX: boolean;
 }
 
-// Set to true to force-test offline UI without killing your network
 const DEBUG_FORCE_OFFLINE = false;
 
 export default function App() {
@@ -32,17 +38,20 @@ export default function App() {
 
   useEffect(() => {
     if (DEBUG_FORCE_OFFLINE) return;
-    const goOnline  = () => setIsOffline(false);
+
+    const goOnline = () => setIsOffline(false);
     const goOffline = () => setIsOffline(true);
-    window.addEventListener("online",  goOnline);
+
+    window.addEventListener("online", goOnline);
     window.addEventListener("offline", goOffline);
+
     return () => {
-      window.removeEventListener("online",  goOnline);
+      window.removeEventListener("online", goOnline);
       window.removeEventListener("offline", goOffline);
     };
   }, []);
 
-  // ── Screen routing ──────────────────────────────────────────────────────────
+  //  Landing
 
   if (screen === "landing") {
     return (
@@ -54,17 +63,21 @@ export default function App() {
     );
   }
 
+  //  Home
+
   if (screen === "home") {
     return (
       <HomeScreen
         isOffline={isOffline}
         onPlay={() => setScreen("modes")}
         onLocalGame={() => setScreen("local-game")}
-        onProfile={() => console.log("go profile")}
-        onLeaderboard={() => console.log("go leaderboard")}
+        onProfile={() => setScreen("profile")} // ✅ UPDATED
+        onLeaderboard={() => setScreen("leaderboard")} // ✅ UPDATED
       />
     );
   }
+
+  //  Modes
 
   if (screen === "modes") {
     return (
@@ -79,6 +92,8 @@ export default function App() {
     );
   }
 
+  //  Matchmaking
+
   if (screen === "matchmaking") {
     return (
       <MatchmakingScreen
@@ -91,17 +106,14 @@ export default function App() {
     );
   }
 
+  //  Local Game
+
   if (screen === "local-game") {
-    return (
-      <LocalGameScreen
-        onBack={() => setScreen("modes")}
-      />
-    );
+    return <LocalGameScreen onBack={() => setScreen("modes")} />;
   }
 
-  // ── Online game ─────────────────────────────────────────────────────────────
-  // matchState is always set by MatchmakingScreen before we arrive here,
-  // but we guard defensively in case of a stale navigation.
+  //  Online Game
+
   if (screen === "game" && matchState) {
     return (
       <OnlineGameScreen
@@ -116,9 +128,33 @@ export default function App() {
     );
   }
 
-  // Fallback: stale "game" route with no match state → bounce to modes
+  // Fallback safety
   if (screen === "game" && !matchState) {
     setScreen("modes");
+    return null;
+  }
+
+  //  Profile
+
+  if (screen === "profile") {
+    return (
+      <ProfileScreen
+        onBack={() => setScreen("home")}
+        onMatchHistory={() => setScreen("matchHistory")}
+      />
+    );
+  }
+
+  //  Match History
+
+  if (screen === "matchHistory") {
+    return <MatchHistoryScreen onBack={() => setScreen("profile")} />;
+  }
+
+  //  Leaderboard
+
+  if (screen === "leaderboard") {
+    return <LeaderboardScreen onBack={() => setScreen("home")} />;
   }
 
   return null;

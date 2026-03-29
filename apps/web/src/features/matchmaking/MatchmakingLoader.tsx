@@ -233,7 +233,7 @@ export default function MatchmakingLoader({ phase }: Props) {
         /* (phase log removed) */
       `}</style>
 
-      {/* ── Arena ── */}
+      {/*  Arena  */}
       <div className="mm-arena" style={{ ["--acc" as string]: accentColor }}>
         {/* Ripple rings — searching / joining */}
         {(isSearching || isJoining) && (
@@ -328,7 +328,7 @@ export default function MatchmakingLoader({ phase }: Props) {
         )}
       </div>
 
-      {/* ── Status chip ── */}
+      {/*  Status chip  */}
       <div
         className="mm-chip"
         style={

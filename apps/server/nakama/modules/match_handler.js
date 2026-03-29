@@ -2,6 +2,22 @@
  * match_handler.js — Authoritative XO match handler for Nakama (JavaScript runtime)
  * op-code 1: all client→server messages (move, forfeit, resync)
  * Server always broadcasts full state after every change.
+ *
+ * Storage written by server:
+ *   matches/{matchId}         — full match record (public read)
+ *   user_matches/list         — per-user list of match IDs (private)
+ *   profile/data              — wins/losses/draws/rating/streaks/gamesPlayed
+ *   leaderboard xo_alltime    — Nakama native leaderboard, never resets
+ *   leaderboard xo_monthly    — Nakama native leaderboard, resets monthly
+ *
+ * RATING SYSTEM (provisional):
+ *   - All players start at 800 (set by client setupUser)
+ *   - Games 1–10: Win +30 / Loss −15 (high volatility, fast placement)
+ *   - Games 11+:  Win +10 / Loss −5  (stable, incremental)
+ *   - Draws:      No rating change
+ *   - Floor:      0 (rating never goes negative)
+ *   - gamesPlayed is incremented on every outcome and used server-side to
+ *     determine the provisional window. The client mirrors this field for UI.
  */
 
 var WIN_LINES = [
@@ -14,6 +30,14 @@ var WIN_LINES = [
   [0, 4, 8],
   [2, 4, 6],
 ];
+
+var PROVISIONAL_GAMES = 10;
+var RATING_WIN_EARLY = 30;
+var RATING_LOSS_EARLY = 15;
+var RATING_WIN_STABLE = 10;
+var RATING_LOSS_STABLE = 5;
+var RATING_FLOOR = 0;
+var RATING_START = 800; // mirrors setupUser default
 
 function checkWinner(board) {
   for (var i = 0; i < WIN_LINES.length; i++) {
@@ -36,8 +60,87 @@ function broadcast(nk, dispatcher, state, presences) {
   );
 }
 
-function saveMatchResult(ctx, nk, logger, state) {
+// ── Leaderboard helpers ────────────────────────────────────────────────────────
+
+/**
+ * Submits wins (score) and rating (subscore) to both leaderboards.
+ * Called server-side only — never from the client after a match.
+ *
+ * NOTE: Nakama's "BEST" operator only updates subscore when the primary score
+ * also improves. If a player's win count doesn't change (e.g. on a draw or
+ * loss), the rating change won't be reflected until they win again.
+ * This is a known Nakama limitation. If you need rating to always update,
+ * switch to using rating as the primary score field instead of wins.
+ */
+function submitLeaderboard(nk, logger, userId, username, wins, rating) {
+  var displayName = username || "";
+  try {
+    nk.leaderboardRecordWrite(
+      "xo_alltime",
+      userId,
+      displayName,
+      wins,
+      rating,
+      {},
+    );
+  } catch (e) {
+    logger.warn("[XO] leaderboard alltime write failed: " + e);
+  }
+  try {
+    nk.leaderboardRecordWrite(
+      "xo_monthly",
+      userId,
+      displayName,
+      wins,
+      rating,
+      {},
+    );
+  } catch (e) {
+    logger.warn("[XO] leaderboard monthly write failed: " + e);
+  }
+}
+
+// ── Storage helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Returns a blank profile object used when a player has no profile yet.
+ * Keeps the default consistent between server and client (setupUser).
+ */
+function defaultProfile(username) {
+  return {
+    username: username || null,
+    wins: 0,
+    losses: 0,
+    draws: 0,
+    rating: RATING_START,
+    winStreak: 0,
+    bestStreak: 0,
+    gamesPlayed: 0,
+  };
+}
+
+/**
+ * Apply provisional or stable rating delta for a single outcome.
+ * Returns the new rating (clamped to RATING_FLOOR).
+ */
+function applyRatingDelta(currentRating, gamesPlayedBefore, won, drew) {
+  if (drew) return currentRating; // draws: no change
+
+  var isEarly = gamesPlayedBefore < PROVISIONAL_GAMES;
+
+  if (won) {
+    return currentRating + (isEarly ? RATING_WIN_EARLY : RATING_WIN_STABLE);
+  } else {
+    var penalty = isEarly ? RATING_LOSS_EARLY : RATING_LOSS_STABLE;
+    return Math.max(RATING_FLOOR, currentRating - penalty);
+  }
+}
+
+function saveMatchResult(ctx, nk, logger, state, endReason) {
   var matchId = state.matchId;
+  var openingCell = state.moves.length > 0 ? state.moves[0] : null;
+
+  // ── Write match record (public readable) ────────────────────────────────────
   try {
     nk.storageWrite([
       {
@@ -45,9 +148,17 @@ function saveMatchResult(ctx, nk, logger, state) {
         key: matchId,
         value: {
           matchId: matchId,
-          players: state.players,
+          players: state.players.map(function (p) {
+            return {
+              userId: p.userId,
+              symbol: p.symbol,
+              username: p.username || null,
+            };
+          }),
           moves: state.moves,
           winner: state.winner,
+          endReason: endReason, // "win" | "draw" | "timeout" | "forfeit"
+          openingCell: openingCell,
           createdAt: Date.now(),
         },
         permissionRead: 2,
@@ -55,21 +166,33 @@ function saveMatchResult(ctx, nk, logger, state) {
       },
     ]);
   } catch (e) {
-    logger.warn("[XO] saveMatchResult: " + e);
+    logger.warn("[XO] match write failed: " + e);
   }
 
+  // ── Per-player: update match list, profile stats, and leaderboard ───────────
   for (var i = 0; i < state.players.length; i++) {
-    var userId = state.players[i].userId;
-    var symbol = state.players[i].symbol;
+    var player = state.players[i];
+    var userId = player.userId;
+    var symbol = player.symbol;
+    var won = state.winner !== "draw" && state.winner === symbol;
+    var drew = state.winner === "draw";
 
+    // ── Append to user_matches list ──────────────────────────────────────────
     var history = [];
     try {
       var res = nk.storageRead([
         { collection: "user_matches", key: "list", userId: userId },
       ]);
       if (res.length > 0) history = res[0].value.matches || [];
-    } catch (e) {}
-    history.push(matchId);
+    } catch (e) {
+      logger.warn(
+        "[XO] user_matches read failed for " + userId.slice(0, 8) + ": " + e,
+      );
+    }
+
+    history.unshift(matchId);
+    if (history.length > 200) history = history.slice(0, 200);
+
     try {
       nk.storageWrite([
         {
@@ -81,43 +204,117 @@ function saveMatchResult(ctx, nk, logger, state) {
           permissionWrite: 1,
         },
       ]);
-    } catch (e) {}
+    } catch (e) {
+      logger.warn(
+        "[XO] user_matches write failed for " + userId.slice(0, 8) + ": " + e,
+      );
+    }
 
+    // ── Read profile (or initialise default if missing) ──────────────────────
+    var profile;
     try {
       var pres = nk.storageRead([
         { collection: "profile", key: "data", userId: userId },
       ]);
       if (pres.length > 0) {
-        var profile = pres[0].value;
-        if (state.winner === "draw") {
-          profile.draws = (profile.draws || 0) + 1;
-        } else {
-          var won = symbol === state.winner;
-          profile.wins = (profile.wins || 0) + (won ? 1 : 0);
-          profile.losses = (profile.losses || 0) + (won ? 0 : 1);
-          profile.rating = Math.max(
-            0,
-            (profile.rating || 1200) + (won ? 10 : -5),
-          );
-        }
-        nk.storageWrite([
-          {
-            collection: "profile",
-            key: "data",
-            userId: userId,
-            value: profile,
-            permissionRead: 2,
-            permissionWrite: 1,
-          },
-        ]);
+        profile = pres[0].value;
+      } else {
+        logger.info(
+          "[XO] No profile found for " +
+            userId.slice(0, 8) +
+            " — initialising defaults",
+        );
+        profile = defaultProfile(player.username || null);
       }
     } catch (e) {
-      logger.warn("[XO] profile update failed: " + e);
+      logger.warn(
+        "[XO] profile read failed for " + userId.slice(0, 8) + ": " + e,
+      );
+      profile = defaultProfile(player.username || null);
     }
+
+    // Ensure gamesPlayed exists on legacy profiles (created before this field)
+    if (typeof profile.gamesPlayed !== "number") {
+      profile.gamesPlayed = profile.wins + profile.losses + profile.draws;
+    }
+
+    // Ensure rating exists on legacy profiles
+    if (typeof profile.rating !== "number") {
+      profile.rating = RATING_START;
+    }
+
+    // ── Mutate stats ─────────────────────────────────────────────────────────
+    var gamesBeforeThis = profile.gamesPlayed;
+
+    if (drew) {
+      profile.draws = (profile.draws || 0) + 1;
+      profile.winStreak = 0;
+    } else if (won) {
+      profile.wins = (profile.wins || 0) + 1;
+      profile.winStreak = (profile.winStreak || 0) + 1;
+      profile.bestStreak = Math.max(profile.bestStreak || 0, profile.winStreak);
+    } else {
+      // Loss
+      profile.losses = (profile.losses || 0) + 1;
+      profile.winStreak = 0;
+    }
+
+    // Apply rating delta — uses gamesBeforeThis so provisional window is exact
+    profile.rating = applyRatingDelta(
+      profile.rating,
+      gamesBeforeThis,
+      won,
+      drew,
+    );
+
+    // Increment gamesPlayed after computing the delta
+    profile.gamesPlayed = gamesBeforeThis + 1;
+
+    logger.info(
+      "[XO] " +
+        userId.slice(0, 8) +
+        " outcome=" +
+        (drew ? "draw" : won ? "win" : "loss") +
+        " provisional=" +
+        (gamesBeforeThis < PROVISIONAL_GAMES) +
+        " rating=" +
+        profile.rating +
+        " gamesPlayed=" +
+        profile.gamesPlayed,
+    );
+
+    // ── Write updated profile back ───────────────────────────────────────────
+    try {
+      nk.storageWrite([
+        {
+          collection: "profile",
+          key: "data",
+          userId: userId,
+          value: profile,
+          permissionRead: 2,
+          permissionWrite: 1,
+        },
+      ]);
+    } catch (e) {
+      logger.warn(
+        "[XO] profile write failed for " + userId.slice(0, 8) + ": " + e,
+      );
+    }
+
+    // ── Submit to leaderboards (server-side only) ────────────────────────────
+    submitLeaderboard(
+      nk,
+      logger,
+      userId,
+      profile.username || null,
+      profile.wins || 0,
+      profile.rating,
+    );
   }
 }
 
-//  Lifecycle
+// ── Lifecycle ──────────────────────────────────────────────────────────────────
+
 function matchInit(ctx, logger, nk, params) {
   logger.info("[XO] matchInit matchId=" + ctx.matchId);
   return {
@@ -170,7 +367,11 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
     }
     if (!alreadyIn && state.players.length < 2) {
       var symbol = state.players.length === 0 ? "X" : "O";
-      state.players.push({ userId: p.userId, symbol: symbol });
+      state.players.push({
+        userId: p.userId,
+        symbol: symbol,
+        username: p.username,
+      });
       logger.info("[XO] " + p.username + " joined as " + symbol);
     } else if (alreadyIn) {
       logger.info("[XO] " + p.username + " reconnected");
@@ -183,10 +384,7 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
     logger.info("[XO] Game started — first turn: " + state.turn.slice(0, 8));
   }
 
-  if (state.players.length === 2) {
-    broadcast(nk, dispatcher, state);
-  }
-
+  if (state.players.length === 2) broadcast(nk, dispatcher, state);
   return { state: state };
 }
 
@@ -200,30 +398,26 @@ function matchLeave(ctx, logger, nk, dispatcher, tick, state, presences) {
 function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
   if (state.winner !== null) return { state: state };
 
-  //  Timer check
-  var TURN_LIMIT = 30000; // 30 seconds
+  var TURN_LIMIT = 30000;
 
+  // ── Timeout check ──────────────────────────────────────────────────────────
   if (state.turn && !state.winner) {
     var elapsed = Date.now() - state.turnStartTime;
-
     if (elapsed > TURN_LIMIT) {
       logger.info("[XO] Turn timeout for " + state.turn.slice(0, 8));
-
-      var loser = state.turn;
       var winnerPlayer = null;
-
       for (var i = 0; i < state.players.length; i++) {
-        if (state.players[i].userId !== loser) {
+        if (state.players[i].userId !== state.turn) {
           winnerPlayer = state.players[i];
           break;
         }
       }
-
       if (winnerPlayer) {
         state.winner = winnerPlayer.symbol;
+        state.turnStartTime = 0;
         logger.info("[XO] Timeout — winner: " + state.winner);
         try {
-          saveMatchResult(ctx, nk, logger, state);
+          saveMatchResult(ctx, nk, logger, state, "timeout");
         } catch (e) {
           logger.error("[XO] saveMatchResult: " + e);
         }
@@ -233,6 +427,7 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     }
   }
 
+  // ── Process messages ───────────────────────────────────────────────────────
   for (var i = 0; i < messages.length; i++) {
     var msg = messages[i];
     var data;
@@ -243,14 +438,14 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       continue;
     }
 
-    //  Resync request (empty payload, no index, no forfeit)
+    // Resync
     if (typeof data.index === "undefined" && !data.forfeit) {
       logger.info("[XO] Resync from " + msg.sender.userId.slice(0, 8));
       broadcast(nk, dispatcher, state, [msg.sender]);
       continue;
     }
 
-    //  Forfeit
+    // Forfeit
     if (data.forfeit === true) {
       if (state.winner) continue;
       var forfeitingPlayer = null;
@@ -271,7 +466,7 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
           " wins",
       );
       try {
-        saveMatchResult(ctx, nk, logger, state);
+        saveMatchResult(ctx, nk, logger, state, "forfeit");
       } catch (e) {
         logger.error("[XO] saveMatchResult: " + e);
       }
@@ -279,9 +474,8 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       continue;
     }
 
-    //  Move
+    // Move
     if (state.winner) continue;
-
     if (msg.sender.userId !== state.turn) {
       logger.warn("[XO] Out-of-turn from " + msg.sender.userId.slice(0, 8));
       continue;
@@ -297,7 +491,6 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       logger.warn("[XO] Invalid index " + index);
       continue;
     }
-
     if (state.board[index] !== null) {
       logger.warn("[XO] Cell " + index + " occupied");
       continue;
@@ -330,7 +523,7 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       state.turnStartTime = 0;
       logger.info("[XO] Winner: " + winner);
       try {
-        saveMatchResult(ctx, nk, logger, state);
+        saveMatchResult(ctx, nk, logger, state, "win");
       } catch (e) {
         logger.error("[XO] saveMatchResult: " + e);
       }
@@ -344,9 +537,10 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       }
       if (!hasNull) {
         state.winner = "draw";
+        state.turnStartTime = 0;
         logger.info("[XO] Draw");
         try {
-          saveMatchResult(ctx, nk, logger, state);
+          saveMatchResult(ctx, nk, logger, state, "draw");
         } catch (e) {
           logger.error("[XO] saveMatchResult: " + e);
         }
@@ -357,8 +551,8 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
             break;
           }
         }
-        logger.info("[XO] Next turn: " + state.turn.slice(0, 8));
         state.turnStartTime = Date.now();
+        logger.info("[XO] Next turn: " + state.turn.slice(0, 8));
       }
     }
 
@@ -396,7 +590,31 @@ function matchmakerMatched(ctx, logger, nk, matches) {
   }
 }
 
+// ── Leaderboard initialisation (run once on module load) ──────────────────────
+
 var InitModule = function (ctx, logger, nk, initializer) {
+  try {
+    nk.leaderboardCreate("xo_alltime", false, "desc", "best", "", {});
+    logger.info("[XO] Leaderboard xo_alltime ready");
+  } catch (e) {
+    if (String(e).indexOf("already exists") !== -1) {
+      logger.info("[XO] xo_alltime already exists, skipping create");
+    } else {
+      logger.warn("[XO] xo_alltime create failed: " + e);
+    }
+  }
+
+  try {
+    nk.leaderboardCreate("xo_monthly", false, "desc", "best", "0 0 1 * *", {});
+    logger.info("[XO] Leaderboard xo_monthly ready");
+  } catch (e) {
+    if (String(e).indexOf("already exists") !== -1) {
+      logger.info("[XO] xo_monthly already exists, skipping create");
+    } else {
+      logger.warn("[XO] xo_monthly create failed: " + e);
+    }
+  }
+
   initializer.registerMatch("xo", {
     matchInit: matchInit,
     matchJoinAttempt: matchJoinAttempt,
