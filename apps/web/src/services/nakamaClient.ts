@@ -20,7 +20,7 @@ export const getSocket = (): Socket => {
 
 export const getConnectGen = () => _connectGen;
 
-// ── Types ──────────────────────────────────────────────────────────────────────
+//  Types
 
 export interface ConnectResult {
   socket: Socket;
@@ -94,7 +94,7 @@ export interface RatingPoint {
   outcome: "win" | "loss" | "draw";
 }
 
-// ── Device / Connect ───────────────────────────────────────────────────────────
+//  Device / Connect
 
 const getOrCreateDeviceId = (): string => {
   const existing = localStorage.getItem("xo_device_id");
@@ -153,7 +153,7 @@ export const disconnect = async (): Promise<void> => {
   }
 };
 
-// ── Profile ────────────────────────────────────────────────────────────────────
+//  Profile
 
 export const setupUser = async (
   session: Session,
@@ -249,7 +249,7 @@ export const updateProfile = async (
   ]);
 };
 
-// ── Analytics ──────────────────────────────────────────────────────────────────
+//  Analytics
 
 export const getAnalytics = async (
   session: Session,
@@ -346,7 +346,7 @@ export const recordMatchAnalytics = async (
   ]);
 };
 
-// ── Match History ──────────────────────────────────────────────────────────────
+//  Match History
 
 export const getMatchIdList = async (session: Session): Promise<string[]> => {
   const res = await client.readStorageObjects(session, {
@@ -405,7 +405,7 @@ export const getRatingHistory = async (
   // getRecentMatches returns newest-first; reverse to get oldest-first
   const chronological = [...matches].reverse();
 
-  const PROVISIONAL = 10;
+  const PROVISIONAL = 3;
   let rating = 800;
   let gameNum = 0;
   const points: RatingPoint[] = [];
@@ -439,7 +439,7 @@ export const getRatingHistory = async (
   return points;
 };
 
-// ── Leaderboard ────────────────────────────────────────────────────────────────
+//  Leaderboard
 
 /**
  * @deprecated DO NOT call this after a match ends.

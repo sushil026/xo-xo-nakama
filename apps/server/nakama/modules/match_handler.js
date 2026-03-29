@@ -31,7 +31,7 @@ var WIN_LINES = [
   [2, 4, 6],
 ];
 
-var PROVISIONAL_GAMES = 10;
+var PROVISIONAL_GAMES = 3;
 var RATING_WIN_EARLY = 30;
 var RATING_LOSS_EARLY = 15;
 var RATING_WIN_STABLE = 10;
@@ -60,7 +60,7 @@ function broadcast(nk, dispatcher, state, presences) {
   );
 }
 
-// ── Leaderboard helpers ────────────────────────────────────────────────────────
+//  Leaderboard helpers
 
 /**
  * Submits wins (score) and rating (subscore) to both leaderboards.
@@ -72,7 +72,29 @@ function broadcast(nk, dispatcher, state, presences) {
  * This is a known Nakama limitation. If you need rating to always update,
  * switch to using rating as the primary score field instead of wins.
  */
-function submitLeaderboard(nk, logger, userId, username, wins, rating) {
+
+// Change the signature
+function submitLeaderboard(
+  nk,
+  logger,
+  userId,
+  username,
+  wins,
+  rating,
+  gamesPlayed,
+) {
+  // Block placement-phase players from appearing on leaderboard
+  if (gamesPlayed < 5) {
+    logger.info(
+      "[XO] Skipping leaderboard write for " +
+        userId.slice(0, 8) +
+        " — placement phase (" +
+        gamesPlayed +
+        "/10 games)",
+    );
+    return;
+  }
+
   var displayName = username || "";
   try {
     nk.leaderboardRecordWrite(
@@ -100,7 +122,7 @@ function submitLeaderboard(nk, logger, userId, username, wins, rating) {
   }
 }
 
-// ── Storage helpers ────────────────────────────────────────────────────────────
+//  Storage helpers
 
 /**
  * Returns a blank profile object used when a player has no profile yet.
@@ -140,7 +162,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
   var matchId = state.matchId;
   var openingCell = state.moves.length > 0 ? state.moves[0] : null;
 
-  // ── Write match record (public readable) ────────────────────────────────────
+  //  Write match record (public readable)
   try {
     nk.storageWrite([
       {
@@ -169,7 +191,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
     logger.warn("[XO] match write failed: " + e);
   }
 
-  // ── Per-player: update match list, profile stats, and leaderboard ───────────
+  //  Per-player: update match list, profile stats, and leaderboard
   for (var i = 0; i < state.players.length; i++) {
     var player = state.players[i];
     var userId = player.userId;
@@ -177,7 +199,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
     var won = state.winner !== "draw" && state.winner === symbol;
     var drew = state.winner === "draw";
 
-    // ── Append to user_matches list ──────────────────────────────────────────
+    //  Append to user_matches list
     var history = [];
     try {
       var res = nk.storageRead([
@@ -210,7 +232,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
       );
     }
 
-    // ── Read profile (or initialise default if missing) ──────────────────────
+    //  Read profile (or initialise default if missing)
     var profile;
     try {
       var pres = nk.storageRead([
@@ -243,7 +265,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
       profile.rating = RATING_START;
     }
 
-    // ── Mutate stats ─────────────────────────────────────────────────────────
+    //  Mutate stats
     var gamesBeforeThis = profile.gamesPlayed;
 
     if (drew) {
@@ -283,7 +305,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
         profile.gamesPlayed,
     );
 
-    // ── Write updated profile back ───────────────────────────────────────────
+    //  Write updated profile back
     try {
       nk.storageWrite([
         {
@@ -301,7 +323,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
       );
     }
 
-    // ── Submit to leaderboards (server-side only) ────────────────────────────
+    //  Submit to leaderboards (server-side only)
     submitLeaderboard(
       nk,
       logger,
@@ -309,11 +331,12 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
       profile.username || null,
       profile.wins || 0,
       profile.rating,
+      profile.gamesPlayed,
     );
   }
 }
 
-// ── Lifecycle ──────────────────────────────────────────────────────────────────
+//  Lifecycle
 
 function matchInit(ctx, logger, nk, params) {
   logger.info("[XO] matchInit matchId=" + ctx.matchId);
@@ -400,7 +423,7 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
 
   var TURN_LIMIT = 30000;
 
-  // ── Timeout check ──────────────────────────────────────────────────────────
+  //  Timeout check
   if (state.turn && !state.winner) {
     var elapsed = Date.now() - state.turnStartTime;
     if (elapsed > TURN_LIMIT) {
@@ -427,7 +450,7 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     }
   }
 
-  // ── Process messages ───────────────────────────────────────────────────────
+  //  Process messages
   for (var i = 0; i < messages.length; i++) {
     var msg = messages[i];
     var data;
@@ -590,11 +613,11 @@ function matchmakerMatched(ctx, logger, nk, matches) {
   }
 }
 
-// ── Leaderboard initialisation (run once on module load) ──────────────────────
+//  Leaderboard initialisation (run once on module load)
 
 var InitModule = function (ctx, logger, nk, initializer) {
   try {
-    nk.leaderboardCreate("xo_alltime", false, "desc", "best", "", {});
+    nk.leaderboardCreate("xo_alltime", false, "desc", "set", "", {});
     logger.info("[XO] Leaderboard xo_alltime ready");
   } catch (e) {
     if (String(e).indexOf("already exists") !== -1) {
@@ -605,7 +628,7 @@ var InitModule = function (ctx, logger, nk, initializer) {
   }
 
   try {
-    nk.leaderboardCreate("xo_monthly", false, "desc", "best", "0 0 1 * *", {});
+    nk.leaderboardCreate("xo_monthly", false, "desc", "set", "0 0 1 * *", {});
     logger.info("[XO] Leaderboard xo_monthly ready");
   } catch (e) {
     if (String(e).indexOf("already exists") !== -1) {

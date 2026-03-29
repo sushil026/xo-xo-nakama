@@ -91,6 +91,8 @@ function ThermalHeatmap({
 
   const SIZE = 270;
 
+  // Replace the entire draw callback inside ThermalHeatmap
+
   const draw = useCallback(() => {
     const heatCanvas = heatRef.current;
     const labelCanvas = labelRef.current;
@@ -104,65 +106,176 @@ function ThermalHeatmap({
     const sCtx = scaleCanvas.getContext("2d")!;
     const W = heatCanvas.width;
     const CELL = W / 3;
-    const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
-    // Heat layer
-    hCtx.clearRect(0, 0, W, W);
-    hCtx.fillStyle = isDark ? "#1a1a18" : "#f0ede8";
+    //  Background
+    hCtx.fillStyle = "#111110";
     hCtx.fillRect(0, 0, W, W);
 
     const totals = data.map(([w, l, d]) => w + l + d);
     const maxTotal = Math.max(...totals, 1);
 
-    data.forEach(([w, l, d], i) => {
-      const total = w + l + d;
+    //  Compute intensity per cell
+    const intensities = data.map((_, i) => totals[i] / maxTotal);
+
+    // Color key per cell
+    const colorKeys = data.map(
+      ([w, l, d]): "hot" | "amber" | "green" | "empty" => {
+        const total = w + l + d;
+        if (total === 0) return "empty";
+        if (!isOpening) return "hot"; // activity mode: always thermal red
+        const wr = w / total;
+        const lr = l / total;
+        if (wr >= lr && wr >= d / total) return "hot"; // win-heavy → red/orange
+        if (lr > wr && lr >= d / total) return "green"; // loss-heavy → green
+        return "amber"; // draw-heavy → amber
+      },
+    );
+
+    hCtx.fillStyle = "#0e0e0c";
+    hCtx.fillRect(0, 0, W, W);
+
+    // Stable per-render jitter
+    const rng = (() => {
+      let s = 0xdeadbeef;
+      return () => {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return (s >>> 0) / 0xffffffff;
+      };
+    })();
+
+    const THERMAL: Record<string, (a: number) => CanvasGradient> = {
+      hot: (alpha) => {
+        // white core → yellow → orange → red → dark
+        const g = hCtx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        g.addColorStop(0, `rgba(255,255,220,${alpha})`);
+        g.addColorStop(0.12, `rgba(255,220,0,${alpha * 0.95})`);
+        g.addColorStop(0.3, `rgba(255,110,0,${alpha * 0.85})`);
+        g.addColorStop(0.55, `rgba(210,20,0,${alpha * 0.6})`);
+        g.addColorStop(0.78, `rgba(100,0,40,${alpha * 0.25})`);
+        g.addColorStop(1, `rgba(0,0,0,0)`);
+        return g;
+      },
+      green: (alpha) => {
+        const g = hCtx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        g.addColorStop(0, `rgba(200,255,150,${alpha})`);
+        g.addColorStop(0.2, `rgba(80,220,40,${alpha * 0.9})`);
+        g.addColorStop(0.45, `rgba(20,160,20,${alpha * 0.65})`);
+        g.addColorStop(0.72, `rgba(0,80,10,${alpha * 0.25})`);
+        g.addColorStop(1, `rgba(0,0,0,0)`);
+        return g;
+      },
+      amber: (alpha) => {
+        const g = hCtx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        g.addColorStop(0, `rgba(255,240,160,${alpha})`);
+        g.addColorStop(0.25, `rgba(240,160,40,${alpha * 0.9})`);
+        g.addColorStop(0.5, `rgba(180,90,0,${alpha * 0.6})`);
+        g.addColorStop(0.78, `rgba(80,30,0,${alpha * 0.2})`);
+        g.addColorStop(1, `rgba(0,0,0,0)`);
+        return g;
+      },
+    };
+
+    const drawBlob = (
+      cx: number,
+      cy: number,
+      radius: number,
+      alpha: number,
+      colorKey: string,
+    ) => {
+      hCtx.save();
+      hCtx.translate(cx, cy);
+      hCtx.scale(radius, radius);
+      const grad = THERMAL[colorKey]?.(alpha) ?? THERMAL.hot(alpha);
+      // Re-create gradient in local space
+      hCtx.restore();
+
+      // Draw in world space with proper gradient
+      const g2 = hCtx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      const stops: [number, string][] =
+        colorKey === "hot"
+          ? [
+              [0, `rgba(255,255,220,${alpha})`],
+              [0.12, `rgba(255,220,0,${alpha * 0.95})`],
+              [0.3, `rgba(255,110,0,${alpha * 0.85})`],
+              [0.55, `rgba(210,20,0,${alpha * 0.6})`],
+              [0.78, `rgba(100,0,40,${alpha * 0.25})`],
+              [1, `rgba(0,0,0,0)`],
+            ]
+          : colorKey === "green"
+            ? [
+                [0, `rgba(200,255,150,${alpha})`],
+                [0.2, `rgba(80,220,40,${alpha * 0.9})`],
+                [0.45, `rgba(20,160,20,${alpha * 0.65})`],
+                [0.72, `rgba(0,80,10,${alpha * 0.25})`],
+                [1, `rgba(0,0,0,0)`],
+              ]
+            : [
+                [0, `rgba(255,240,160,${alpha})`],
+                [0.25, `rgba(240,160,40,${alpha * 0.9})`],
+                [0.5, `rgba(180,90,0,${alpha * 0.6})`],
+                [0.78, `rgba(80,30,0,${alpha * 0.2})`],
+                [1, `rgba(0,0,0,0)`],
+              ];
+      stops.forEach(([t, c]) => g2.addColorStop(t, c));
+      hCtx.fillStyle = g2;
+      hCtx.beginPath();
+      hCtx.ellipse(cx, cy, radius * 1.08, radius * 0.94, 0, 0, Math.PI * 2);
+      hCtx.fill();
+    };
+
+    intensities.forEach((intensity, i) => {
+      const colorKey = colorKeys[i];
+      if (colorKey === "empty") return;
+
       const col = i % 3;
       const row = Math.floor(i / 3);
       const cx = col * CELL + CELL / 2;
       const cy = row * CELL + CELL / 2;
 
-      if (total === 0) {
-        hCtx.fillStyle = isDark ? "#222220" : "#e8e5e0";
-        hCtx.fillRect(col * CELL + 1, row * CELL + 1, CELL - 2, CELL - 2);
-      } else {
-        const key = isOpening ? dominantOutcome([w, l, d]) : "coral";
-        const [r, g, b] = RGB_MAP[key];
-        const intensity = isOpening ? w / total : total / maxTotal;
-        const baseAlpha = 0.15 + intensity * 0.75;
-        const blobR = CELL * (0.35 + intensity * 0.28);
+      // Minimum intensity 0.4 so even single-play cells are visible
+      const eff = Math.max(intensity, 0.4);
+      const baseRadius = CELL * (0.38 + eff * 0.3);
+      const baseAlpha = 0.5 + eff * 0.45;
 
-        const blob = (
-          bx: number,
-          by: number,
-          radius: number,
-          alpha: number,
-        ) => {
-          const grad = hCtx.createRadialGradient(bx, by, 0, bx, by, radius);
-          grad.addColorStop(0, `rgba(${r},${g},${b},${alpha})`);
-          grad.addColorStop(0.4, `rgba(${r},${g},${b},${alpha * 0.65})`);
-          grad.addColorStop(0.75, `rgba(${r},${g},${b},${alpha * 0.2})`);
-          grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-          hCtx.fillStyle = grad;
-          hCtx.beginPath();
-          hCtx.ellipse(bx, by, radius * 1.1, radius * 0.85, 0, 0, Math.PI * 2);
-          hCtx.fill();
-        };
+      hCtx.save();
+      hCtx.beginPath();
+      hCtx.rect(col * CELL, row * CELL, CELL, CELL);
+      hCtx.clip();
 
-        hCtx.save();
-        hCtx.beginPath();
-        hCtx.rect(col * CELL + 1, row * CELL + 1, CELL - 2, CELL - 2);
-        hCtx.clip();
-        blob(cx, cy, blobR, baseAlpha);
-        if (intensity > 0.55) blob(cx, cy, blobR * 0.45, baseAlpha * 0.6);
-        hCtx.restore();
+      drawBlob(cx, cy, baseRadius, baseAlpha, colorKey);
+
+      // 2 satellite blobs
+      for (let s = 0; s < 2; s++) {
+        const angle = rng() * Math.PI * 2;
+        const dist = rng() * CELL * 0.18;
+        drawBlob(
+          cx + Math.cos(angle) * dist,
+          cy + Math.sin(angle) * dist,
+          baseRadius * (0.3 + rng() * 0.25),
+          baseAlpha * (0.25 + rng() * 0.3),
+          colorKey,
+        );
       }
-
-      hCtx.strokeStyle = isDark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.09)";
-      hCtx.lineWidth = 1;
-      hCtx.strokeRect(col * CELL + 0.5, row * CELL + 0.5, CELL, CELL);
+      hCtx.restore();
     });
 
-    // Label layer
+    // Grid lines
+    hCtx.strokeStyle = "rgba(255,255,255,0.07)";
+    hCtx.lineWidth = 1;
+    for (let n = 0; n <= 3; n++) {
+      hCtx.beginPath();
+      hCtx.moveTo(n * CELL, 0);
+      hCtx.lineTo(n * CELL, W);
+      hCtx.stroke();
+      hCtx.beginPath();
+      hCtx.moveTo(0, n * CELL);
+      hCtx.lineTo(W, n * CELL);
+      hCtx.stroke();
+    }
+
+    //  Labels — center aligned
     lCtx.clearRect(0, 0, W, W);
     data.forEach(([w, l, d], i) => {
       const total = w + l + d;
@@ -171,42 +284,59 @@ function ThermalHeatmap({
       const cx = col * CELL + CELL / 2;
       const cy = row * CELL + CELL / 2;
 
-      lCtx.font = "500 10px system-ui,sans-serif";
-      lCtx.fillStyle = isDark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.28)";
+      // Cell label top-left
+      lCtx.font = "600 9px system-ui,sans-serif";
+      lCtx.fillStyle = "rgba(255,255,255,0.3)";
       lCtx.textAlign = "left";
-      lCtx.fillText(CELL_LABELS[i], col * CELL + 6, row * CELL + 13);
+      lCtx.textBaseline = "top";
+      lCtx.fillText(CELL_LABELS[i], col * CELL + 6, row * CELL + 5);
+
+      lCtx.textBaseline = "middle";
 
       if (total > 0) {
-        const textColor = isDark ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.85)";
-        const subColor = isDark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.45)";
+        lCtx.shadowColor = "rgba(0,0,0,0.9)";
+        lCtx.shadowBlur = 8;
+
+        // Primary number/% — perfectly centered
         const primary = isOpening
           ? `${Math.round((w / total) * 100)}%`
           : String(total);
 
-        lCtx.font = `700 ${isOpening ? 18 : 20}px system-ui,sans-serif`;
-        lCtx.fillStyle = textColor;
+        lCtx.font = `900 ${isOpening ? 20 : 22}px system-ui,sans-serif`;
+        lCtx.fillStyle = "rgba(255,255,255,0.95)";
         lCtx.textAlign = "center";
-        lCtx.fillText(primary, cx, cy + 6);
+        lCtx.fillText(primary, cx, cy - 6);
 
-        lCtx.font = "400 9px system-ui,sans-serif";
-        lCtx.fillStyle = subColor;
-        lCtx.fillText(`${w}W  ${l}L  ${d}D`, cx, cy + 19);
+        // W/L/D sub-label
+        lCtx.font = "400 8.5px system-ui,sans-serif";
+        lCtx.fillStyle = "rgba(255,255,255,0.5)";
+        lCtx.fillText(`${w}W ${l}L ${d}D`, cx, cy + 11);
+
+        lCtx.shadowBlur = 0;
       } else {
-        lCtx.font = "500 13px system-ui,sans-serif";
-        lCtx.fillStyle = isDark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)";
+        lCtx.font = "400 16px system-ui,sans-serif";
+        lCtx.fillStyle = "rgba(255,255,255,0.1)";
         lCtx.textAlign = "center";
-        lCtx.fillText("—", cx, cy + 5);
+        lCtx.fillText("—", cx, cy);
       }
     });
 
     // Scale bar
-    const grad = sCtx.createLinearGradient(0, 0, scaleCanvas.width, 0);
-    grad.addColorStop(0, "rgba(255,85,64,0.07)");
-    grad.addColorStop(0.4, "rgba(255,85,64,0.38)");
-    grad.addColorStop(0.75, "rgba(255,85,64,0.65)");
-    grad.addColorStop(1, "rgba(255,85,64,0.92)");
+    const sg = sCtx.createLinearGradient(0, 0, scaleCanvas.width, 0);
+    if (isOpening) {
+      sg.addColorStop(0, "rgba(20,160,20,0.9)"); // loss = green left
+      sg.addColorStop(0.4, "rgba(240,160,40,0.85)"); // draw = amber mid
+      sg.addColorStop(0.7, "rgba(255,100,0,0.9)"); // win = orange
+      sg.addColorStop(1, "rgba(255,230,150,1)"); // hot win = yellow-white
+    } else {
+      sg.addColorStop(0, "rgba(0,60,0,0.5)");
+      sg.addColorStop(0.3, "rgba(60,180,20,0.75)");
+      sg.addColorStop(0.6, "rgba(255,160,0,0.88)");
+      sg.addColorStop(0.85, "rgba(255,60,0,0.95)");
+      sg.addColorStop(1, "rgba(255,240,180,1)");
+    }
     sCtx.clearRect(0, 0, scaleCanvas.width, scaleCanvas.height);
-    sCtx.fillStyle = grad;
+    sCtx.fillStyle = sg;
     sCtx.beginPath();
     sCtx.roundRect(0, 0, scaleCanvas.width, scaleCanvas.height, 3);
     sCtx.fill();
@@ -215,6 +345,7 @@ function ThermalHeatmap({
   useEffect(() => {
     draw();
   }, [draw]);
+
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener("change", draw);
@@ -280,13 +411,19 @@ function ThermalHeatmap({
       </div>
 
       {/* Axis labels + canvas */}
-      <div style={{ display: "flex", alignItems: "flex-start" }}>
-        {/* Row axis */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "center",
+        }}
+      >
+        {/* Row axis — LEFT (takes width) */}
         <div
           style={{
             display: "flex",
             flexDirection: "column",
-            width: 44,
+            width: 36,
             flexShrink: 0,
             paddingTop: 24,
           }}
@@ -376,16 +513,21 @@ function ThermalHeatmap({
             />
           </div>
         </div>
+
+        {/* RIGHT spacer — mirrors left axis exactly */}
+        <div style={{ width: 36, flexShrink: 0 }} />
       </div>
 
-      {/* Scale bar */}
+      {/* Scale bar — same total width as grid block, no marginLeft offset */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
           marginTop: 10,
-          marginLeft: 44,
+          width: SIZE + 36 + 36, // canvas + left label width + right spacer
+          marginLeft: "auto",
+          marginRight: "auto",
         }}
       >
         <span
@@ -416,12 +558,22 @@ function ThermalHeatmap({
         </span>
       </div>
 
-      {/* Legend — opening only */}
-      {isOpening && (
-        <div
-          style={{ display: "flex", gap: 14, marginTop: 10, marginLeft: 44 }}
-        >
-          {(["coral", "amber", "muted"] as const).map((key) => {
+      {/* Legend */}
+      <div
+        style={{
+          marginTop: 10,
+          width: SIZE + 36 + 36,
+          marginLeft: "auto",
+          marginRight: "auto",
+          height: 22,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 14,
+        }}
+      >
+        {isOpening ? (
+          (["coral", "amber", "muted"] as const).map((key) => {
             const [r, g, b] = RGB_MAP[key];
             return (
               <div
@@ -445,9 +597,13 @@ function ThermalHeatmap({
                 </span>
               </div>
             );
-          })}
-        </div>
-      )}
+          })
+        ) : (
+          <span style={{ visibility: "hidden" }} className="t-label">
+            placeholder
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -479,78 +635,6 @@ function StatCell({
       </div>
       <div className="t-label" style={{ marginTop: 3, color: "var(--muted)" }}>
         {label}
-      </div>
-    </div>
-  );
-}
-
-//  Insight Cards
-
-function InsightCard({
-  label,
-  cellLabel,
-  winRate,
-  variant,
-}: {
-  label: string;
-  cellLabel: string;
-  winRate: number;
-  variant: "coral" | "amber";
-}) {
-  const color = variant === "coral" ? "var(--coral)" : "var(--amber)";
-  const [r, g, b] = RGB_MAP[variant];
-  return (
-    <div
-      style={{
-        flex: 1,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "10px 14px",
-        background: `rgba(${r},${g},${b},0.06)`,
-        border: `1px solid rgba(${r},${g},${b},0.2)`,
-      }}
-    >
-      <div>
-        <div
-          style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 8,
-            fontWeight: 700,
-            letterSpacing: 2.5,
-            textTransform: "uppercase",
-            color: "var(--muted)",
-            marginBottom: 3,
-          }}
-        >
-          {label}
-        </div>
-        <div
-          style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 18,
-            fontWeight: 900,
-            color,
-          }}
-        >
-          {cellLabel}
-        </div>
-      </div>
-      <div style={{ textAlign: "right" }}>
-        <div
-          style={{
-            fontFamily: "var(--font-display)",
-            fontSize: 20,
-            fontWeight: 900,
-            color,
-            lineHeight: 1,
-          }}
-        >
-          {winRate}%
-        </div>
-        <div className="t-label" style={{ color: "var(--muted)" }}>
-          win rate
-        </div>
       </div>
     </div>
   );
@@ -607,7 +691,7 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
   const gamesPlayed = profile?.gamesPlayed ?? 0;
   const total = wins + losses + draws;
   const winRate = total > 0 ? Math.round((wins / total) * 100) : 0;
-  const isProvisional = gamesPlayed < 10;
+  const isProvisional = gamesPlayed < 3;
 
   const blank: [number, number, number][] = Array(9).fill([0, 0, 0]);
   const openingStats = analytics?.openingStats ?? blank;
@@ -667,11 +751,12 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
           zIndex: 1,
           display: "flex",
           flexDirection: "column",
-          gap: 28,
+          gap: 20,
         }}
       >
-        {/* Identity */}
+        {/* Identity + Win rate */}
         <section>
+          {/* Username */}
           <span className="t-label" style={{ color: "var(--muted)" }}>
             Operator
           </span>
@@ -694,9 +779,11 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
               (profile?.username ?? "Guest")
             )}
           </div>
+
+          {/* Rating row */}
           <div
             style={{
-              marginTop: 10,
+              marginTop: 8,
               display: "flex",
               alignItems: "center",
               gap: 8,
@@ -736,42 +823,42 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
               </span>
             )}
           </div>
-        </section>
 
-        {/* Win rate */}
-        <section>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginBottom: 6,
-            }}
-          >
-            <span className="t-label">Win rate</span>
-            <span
+          {/* Win rate bar — merged in */}
+          <div style={{ marginTop: 14 }}>
+            <div
               style={{
-                fontFamily: "var(--font-display)",
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 1,
-                color: "var(--coral)",
+                display: "flex",
+                justifyContent: "space-between",
+                marginBottom: 6,
               }}
             >
-              {loading ? "—" : `${winRate}%`}
-            </span>
-          </div>
-          <div className="prog-bar">
-            <div
-              className="prog-fill"
-              style={{
-                width: loading ? "0%" : `${winRate}%`,
-                transition: "width 0.6s steps(10)",
-              }}
-            />
+              <span className="t-label">Win rate</span>
+              <span
+                style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  color: "var(--coral)",
+                }}
+              >
+                {loading ? "—" : `${winRate}%`}
+              </span>
+            </div>
+            <div className="prog-bar">
+              <div
+                className="prog-fill"
+                style={{
+                  width: loading ? "0%" : `${winRate}%`,
+                  transition: "width 0.6s steps(10)",
+                }}
+              />
+            </div>
           </div>
         </section>
 
-        {/* ── Rating progression graph ── */}
+        {/*  Rating progression graph  */}
         <section>
           <span
             className="t-label"
@@ -783,14 +870,14 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
           >
             ▸ Rating progression
           </span>
-
-          {/* Graph container — matches existing surface style */}
           <div
             style={{
               background: "var(--surface-lo)",
               border: "1px solid var(--rim)",
               padding: "16px 14px 12px",
               overflow: "hidden",
+              display: "flex",
+              justifyContent: "center",
             }}
           >
             {loading ? (
@@ -821,12 +908,10 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
                 points={ratingHistory}
                 currentRating={rating}
                 startRating={800}
-                provisionalGames={10}
+                provisionalGames={3}
               />
             )}
           </div>
-
-          {/* Provisional explanation — only shown during first 10 games */}
           {isProvisional && !loading && (
             <div
               style={{
@@ -854,7 +939,7 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
                 ▸ Provisional
               </span>
               <span className="t-label" style={{ color: "var(--muted)" }}>
-                First {10 - gamesPlayed} game{10 - gamesPlayed !== 1 ? "s" : ""}{" "}
+                First {3 - gamesPlayed} game{3 - gamesPlayed !== 1 ? "s" : ""}{" "}
                 until your rating stabilises. Wins earn +30, losses cost −15
                 during placement.
               </span>
@@ -903,7 +988,25 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
           </div>
         </section>
 
-        {/* Game analytics */}
+        {/* Thermal heatmap */}
+        <section>
+          <span
+            className="t-label"
+            style={{
+              display: "block",
+              marginBottom: 14,
+              color: "var(--muted)",
+            }}
+          >
+            ▸ Board heatmap
+          </span>
+          <ThermalHeatmap
+            openingData={openingStats}
+            activityData={cellHeatmap}
+          />
+        </section>
+
+        {/*  6. GAME ANALYTICS  */}
         {analytics && (
           <section>
             <span
@@ -942,101 +1045,85 @@ export default function ProfileScreen({ onBack, onMatchHistory }: Props) {
           </section>
         )}
 
-        {/* Opening insights */}
-        {analytics && (bestCell !== null || worstCell !== null) && (
-          <section>
-            <span
-              className="t-label"
-              style={{
-                display: "block",
-                marginBottom: 14,
-                color: "var(--muted)",
-              }}
-            >
-              ▸ Opening insights
-            </span>
-            <div style={{ display: "flex", gap: 8 }}>
-              {bestCell !== null && (
-                <InsightCard
-                  label="Best opening"
-                  cellLabel={CELL_LABELS[bestCell]}
-                  winRate={bestWinRate}
-                  variant="coral"
-                />
-              )}
-              {worstCell !== null && worstCell !== bestCell && (
-                <InsightCard
-                  label="Weakest opening"
-                  cellLabel={CELL_LABELS[worstCell]}
-                  winRate={worstWinRate}
-                  variant="amber"
-                />
-              )}
-            </div>
-          </section>
-        )}
-
-        {/* Thermal heatmap */}
-        <section>
-          <span
-            className="t-label"
-            style={{
-              display: "block",
-              marginBottom: 14,
-              color: "var(--muted)",
-            }}
-          >
-            ▸ Board heatmap
-          </span>
-          <ThermalHeatmap
-            openingData={openingStats}
-            activityData={cellHeatmap}
-          />
-        </section>
-
-        {/* Match history */}
-        <section>
-          <button
-            className="btn btn-ghost btn-full"
+        {/*  7. ACTIONS  */}
+        <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <ActionButton
+            label="History"
+            title="Match History"
             onClick={onMatchHistory}
-            type="button"
-            style={{
-              textAlign: "left",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span>
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  letterSpacing: 2.5,
-                  textTransform: "uppercase",
-                  display: "block",
-                  color: "var(--muted)",
-                  marginBottom: 2,
-                }}
-              >
-                History
-              </span>
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 15,
-                  fontWeight: 800,
-                  color: "var(--soft)",
-                }}
-              >
-                Match History
-              </span>
-            </span>
-            <span style={{ color: "var(--muted)", fontSize: 18 }}>→</span>
-          </button>
+          />
         </section>
       </div>
     </div>
+  );
+}
+
+//  Action Button component
+function ActionButton({
+  label,
+  title,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  onClick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      className="btn btn-ghost btn-full"
+      onClick={onClick}
+      type="button"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        textAlign: "left",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "14px 16px",
+        transition: "box-shadow 150ms ease, border-color 150ms ease",
+        boxShadow: hovered
+          ? "0 0 0 1px rgba(255,85,64,0.35), 0 0 12px rgba(255,85,64,0.08)"
+          : "none",
+        borderColor: hovered ? "rgba(255,85,64,0.4)" : undefined,
+      }}
+    >
+      <span>
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: 2.5,
+            textTransform: "uppercase",
+            display: "block",
+            color: "var(--muted)",
+            marginBottom: 2,
+          }}
+        >
+          {label}
+        </span>
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 15,
+            fontWeight: 800,
+            color: "var(--soft)",
+          }}
+        >
+          {title}
+        </span>
+      </span>
+      <span
+        style={{
+          color: hovered ? "var(--coral)" : "var(--muted)",
+          fontSize: 18,
+          transition: "color 150ms ease",
+        }}
+      >
+        →
+      </span>
+    </button>
   );
 }

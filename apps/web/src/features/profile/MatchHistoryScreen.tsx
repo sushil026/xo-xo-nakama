@@ -610,59 +610,354 @@ function SummaryBar({
 
 function EmptyState() {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: 240,
-        gap: 12,
-      }}
-    >
+    <>
+      <style>{`
+        @keyframes es-fade {
+          0%   { opacity: 0; transform: translateY(6px); }
+          100% { opacity: 1; transform: translateY(0);   }
+        }
+        @keyframes es-draw {
+          0%   { stroke-dashoffset: 40; opacity: 0; }
+          30%  { opacity: 1; }
+          100% { stroke-dashoffset: 0;  opacity: 1; }
+        }
+        @keyframes es-pulse {
+          0%, 100% { opacity: 0.25; }
+          50%      { opacity: 0.55; }
+        }
+      `}</style>
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3,1fr)",
-          gap: 3,
-          width: 54,
-          opacity: 0.15,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "absolute",
+          inset: 0, // ← full screen
+          gap: 18,
+          zIndex: 1,
+          animation: "es-fade 0.5s ease both",
         }}
       >
-        {Array(9)
-          .fill(null)
-          .map((_, i) => (
-            <div
-              key={i}
+        {/* Animated ghost board */}
+        <div style={{ position: "relative", width: 72, height: 72 }}>
+          <svg
+            width="72"
+            height="72"
+            viewBox="0 0 72 72"
+            style={{ animation: "es-pulse 3s ease-in-out infinite" }}
+          >
+            {/* Grid lines */}
+            <line
+              x1="24"
+              y1="5"
+              x2="24"
+              y2="67"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            <line
+              x1="48"
+              y1="5"
+              x2="48"
+              y2="67"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            <line
+              x1="5"
+              y1="24"
+              x2="67"
+              y2="24"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            <line
+              x1="5"
+              y1="48"
+              x2="67"
+              y2="48"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+
+            {/* Ghost X marks — faint, scattered */}
+            {/* cell 0 — X */}
+            <line
+              x1="9"
+              y1="9"
+              x2="19"
+              y2="19"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+            <line
+              x1="19"
+              y1="9"
+              x2="9"
+              y2="19"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+            {/* cell 4 — O */}
+            <circle
+              cx="36"
+              cy="36"
+              r="7"
+              stroke="rgba(240,160,80,0.18)"
+              strokeWidth="2"
+              fill="none"
+            />
+            {/* cell 8 — X */}
+            <line
+              x1="53"
+              y1="53"
+              x2="63"
+              y2="63"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+            <line
+              x1="63"
+              y1="53"
+              x2="53"
+              y2="63"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+            {/* cell 2 — O */}
+            <circle
+              cx="60"
+              cy="12"
+              r="7"
+              stroke="rgba(240,160,80,0.18)"
+              strokeWidth="2"
+              fill="none"
+            />
+            {/* cell 6 — X */}
+            <line
+              x1="9"
+              y1="53"
+              x2="19"
+              y2="63"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+            <line
+              x1="19"
+              y1="53"
+              x2="9"
+              y2="63"
+              stroke="rgba(255,85,64,0.18)"
+              strokeWidth="2"
+              strokeLinecap="square"
+            />
+
+            {/* Animated strike-through diagonal — "no games" slash */}
+            <line
+              x1="6"
+              y1="6"
+              x2="66"
+              y2="66"
+              stroke="rgba(255,85,64,0.35)"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeDasharray="40"
+              strokeDashoffset="40"
               style={{
-                aspectRatio: "1",
-                background: "var(--muted)",
-                borderRadius: 2,
+                animation: "es-draw 1s 0.3s cubic-bezier(.4,0,.2,1) forwards",
               }}
             />
-          ))}
+          </svg>
+        </div>
+
+        {/* Text */}
+        <div
+          style={{
+            textAlign: "center",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 3,
+              textTransform: "uppercase",
+              color: "var(--muted)",
+            }}
+          >
+            No matches yet
+          </div>
+          <div
+            className="t-label"
+            style={{ color: "var(--muted)", opacity: 0.55 }}
+          >
+            Play your first game to see history here
+          </div>
+        </div>
       </div>
+    </>
+  );
+}
+
+function LoadingState() {
+  return (
+    <>
+      <style>{`
+        @keyframes cell-fill {
+          0%, 100% { opacity: 0.08; transform: scale(0.7); }
+          50%       { opacity: 1;    transform: scale(1);   }
+        }
+      `}</style>
       <div
         style={{
-          fontFamily: "var(--font-display)",
-          fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: 3,
-          textTransform: "uppercase",
-          color: "var(--muted)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: 1,
+          gap: 16,
+          position: "absolute",
+          inset: 0,
+          zIndex: 1,
         }}
       >
-        No matches yet
+        <div style={{ position: "relative", width: 64, height: 64 }}>
+          {/* Grid lines — static ghost */}
+          <svg
+            width="64"
+            height="64"
+            viewBox="0 0 64 64"
+            style={{ position: "absolute", top: 0, left: 0 }}
+          >
+            {/* vertical lines */}
+            <line
+              x1="21"
+              y1="4"
+              x2="21"
+              y2="60"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            <line
+              x1="43"
+              y1="4"
+              x2="43"
+              y2="60"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            {/* horizontal lines */}
+            <line
+              x1="4"
+              y1="21"
+              x2="60"
+              y2="21"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+            <line
+              x1="4"
+              y1="43"
+              x2="60"
+              y2="43"
+              stroke="var(--rim)"
+              strokeWidth="1.5"
+            />
+          </svg>
+
+          {/* 9 cells — each animates with staggered delay */}
+          {[
+            // [col, row, symbol, delay]
+            [0, 0, "X", 0],
+            [2, 1, "X", 0.18],
+            [1, 2, "X", 0.36],
+            [1, 0, "O", 0.54],
+            [0, 1, "O", 0.72],
+            [2, 0, "O", 0.9],
+          ].map(([col, row, sym, delay], i) => {
+            const cx = (col as number) * 22 + 11;
+            const cy = (row as number) * 22 + 11;
+            const color = sym === "X" ? "#ff5540" : "#f0a050";
+            return (
+              <div
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: cx - 7,
+                  top: cy - 7,
+                  width: 14,
+                  height: 14,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  animation: `cell-fill 1.4s ease-in-out ${delay}s infinite`,
+                }}
+              >
+                {sym === "X" ? (
+                  <svg width="12" height="12" viewBox="0 0 20 20" fill="none">
+                    <line
+                      x1="4"
+                      y1="4"
+                      x2="16"
+                      y2="16"
+                      stroke={color}
+                      strokeWidth="2.8"
+                      strokeLinecap="square"
+                    />
+                    <line
+                      x1="16"
+                      y1="4"
+                      x2="4"
+                      y2="16"
+                      stroke={color}
+                      strokeWidth="2.8"
+                      strokeLinecap="square"
+                    />
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 20 20" fill="none">
+                    <circle
+                      cx="10"
+                      cy="10"
+                      r="6"
+                      stroke={color}
+                      strokeWidth="2.8"
+                    />
+                  </svg>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <span
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: 3,
+            textTransform: "uppercase",
+            color: "var(--muted)",
+          }}
+        >
+          Loading
+        </span>
       </div>
-      <div className="t-label" style={{ color: "var(--muted)", opacity: 0.6 }}>
-        Play your first game to see history here
-      </div>
-    </div>
+    </>
   );
 }
 
 //  Main screen
-
 export default function MatchHistoryScreen({ onBack }: Props) {
   const [matches, setMatches] = useState<StoredMatch[]>([]);
   const [myUserId, setMyUserId] = useState<string | null>(null);
@@ -751,24 +1046,7 @@ export default function MatchHistoryScreen({ onBack }: Props) {
           WebkitOverflowScrolling: "touch" as const,
         }}
       >
-        {loading && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              height: 160,
-              fontFamily: "var(--font-display)",
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: 3,
-              textTransform: "uppercase",
-              color: "var(--muted)",
-            }}
-          >
-            <span className="blink">Loading</span>
-          </div>
-        )}
+        {loading && <LoadingState />}
 
         {!loading && matches.length === 0 && <EmptyState />}
 

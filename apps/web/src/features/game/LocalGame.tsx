@@ -354,7 +354,7 @@ export default function LocalGameScreen({ onBack }: { onBack: () => void }) {
   );
 }
 
-// ─── Result card — online-style with board replay ────────────────────────────
+//  Result card — online-style with board replay
 function ResultCard({
   result,
   winLine,
@@ -830,7 +830,7 @@ function ResultCard({
   );
 }
 
-// ─── Board cell ───────────────────────────────────────────────────────────────
+//  Board cell
 function BoardCell({
   cell,
   isWin,
@@ -987,7 +987,7 @@ function Corner({
   );
 }
 
-// ─── Player row ───────────────────────────────────────────────────────────────
+//  Player row
 function PlayerRow({
   player,
   active,

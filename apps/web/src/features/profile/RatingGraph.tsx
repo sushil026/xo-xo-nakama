@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+//  Types
 
 export interface RatingPoint {
   game: number; // sequential game number (1-based)
@@ -15,7 +15,7 @@ interface Props {
   provisionalGames?: number; // how many games count as "early" (default 10)
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+//  Constants
 
 const PROVISIONAL_GAMES = 10;
 const TIER_LINES = [
@@ -31,11 +31,7 @@ const OUTCOME_COLOR = {
   draw: "#8c8c82",
 } as const;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t;
-}
+//  Helpers
 
 function getTierLabel(rating: number): { label: string; color: string } {
   if (rating >= 1200) return { label: "ELITE", color: "#ff5540" };
@@ -45,7 +41,7 @@ function getTierLabel(rating: number): { label: string; color: string } {
   return { label: "ROOKIE", color: "#6a6a60" };
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+//  Component
 
 export default function RatingGraph({
   points,
@@ -67,7 +63,7 @@ export default function RatingGraph({
   const H = 180;
   const PAD = { top: 16, right: 20, bottom: 28, left: 42 };
 
-  // ── Data prep ─────────────────────────────────────────────────────────────
+  //  Data prep
   const allRatings = [
     startRating,
     ...points.map((p) => p.rating),
@@ -75,14 +71,6 @@ export default function RatingGraph({
   ];
   const minR = Math.max(0, Math.min(...allRatings) - 60);
   const maxR = Math.max(...allRatings) + 60;
-
-  const toX = (game: number, total: number) =>
-    PAD.left +
-    ((game - 1) / Math.max(total - 1, 1)) * (W - PAD.left - PAD.right);
-
-  const toY = (rating: number) =>
-    PAD.top +
-    (1 - (rating - minR) / (maxR - minR)) * (H - PAD.top - PAD.bottom);
 
   // Build full series starting from (0, startRating)
   const series: {
@@ -93,9 +81,27 @@ export default function RatingGraph({
   points.forEach((p) =>
     series.push({ game: p.game, rating: p.rating, outcome: p.outcome }),
   );
-  const totalGames = series[series.length - 1]?.game ?? 0;
 
-  // ── Draw ──────────────────────────────────────────────────────────────────
+  // totalGames: if only 1 game played, still spread across full width
+  const totalGames = Math.max(series[series.length - 1]?.game ?? 0, 1);
+
+  const toX = useCallback(
+    (game: number) => {
+      // With a single real point (totalGames=1), map game 0 -> PAD.left, game 1 -> W-PAD.right
+      const span = Math.max(totalGames, 1);
+      return PAD.left + (game / span) * (W - PAD.left - PAD.right);
+    },
+    [totalGames, W, PAD.left, PAD.right],
+  );
+
+  const toY = useCallback(
+    (rating: number) =>
+      PAD.top +
+      (1 - (rating - minR) / (maxR - minR)) * (H - PAD.top - PAD.bottom),
+    [minR, maxR, H, PAD.top, PAD.bottom],
+  );
+
+  //  Draw
   const draw = useCallback(
     (prog: number) => {
       const canvas = canvasRef.current;
@@ -154,12 +160,34 @@ export default function RatingGraph({
         ctx.stroke();
       }
 
+      //  No data yet: draw a flat dashed baseline at startRating
       if (series.length < 2) {
-        // No games yet — placeholder
-        ctx.fillStyle = textColor;
-        ctx.font = "600 10px system-ui,sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("Play games to build your rating graph", W / 2, H / 2);
+        const y = toY(startRating);
+        ctx.save();
+        ctx.strokeStyle = isDark
+          ? "rgba(255,85,64,0.25)"
+          : "rgba(255,85,64,0.2)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(PAD.left, y);
+        ctx.lineTo(W - PAD.right, y);
+        ctx.stroke();
+        ctx.restore();
+
+        // Start dot
+        ctx.beginPath();
+        ctx.arc(PAD.left, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,85,64,0.5)";
+        ctx.fill();
+
+        // X axis
+        ctx.strokeStyle = axisColor;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(PAD.left, H - PAD.bottom);
+        ctx.lineTo(W - PAD.right, H - PAD.bottom);
+        ctx.stroke();
         return;
       }
 
@@ -169,7 +197,7 @@ export default function RatingGraph({
 
       // Provisional zone shading (first N games)
       if (provisionalGames > 0) {
-        const provX = toX(Math.min(provisionalGames, totalGames), totalGames);
+        const provX = toX(Math.min(provisionalGames, totalGames));
         ctx.fillStyle = isDark
           ? "rgba(255,85,64,0.04)"
           : "rgba(255,85,64,0.03)";
@@ -197,18 +225,18 @@ export default function RatingGraph({
 
       ctx.beginPath();
       visible.forEach(({ game, rating }, i) => {
-        const x = toX(game, totalGames);
+        const x = toX(game);
         const y = toY(rating);
         if (i === 0) ctx.moveTo(x, y);
         else {
           const prev = visible[i - 1];
-          const px = toX(prev.game, totalGames);
+          const px = toX(prev.game);
           const py = toY(prev.rating);
           const cp = (x - px) * 0.45;
           ctx.bezierCurveTo(px + cp, py, x - cp, y, x, y);
         }
       });
-      const lastX = toX(visible[visible.length - 1].game, totalGames);
+      const lastX = toX(visible[visible.length - 1].game);
       ctx.lineTo(lastX, H - PAD.bottom);
       ctx.lineTo(PAD.left, H - PAD.bottom);
       ctx.closePath();
@@ -221,12 +249,12 @@ export default function RatingGraph({
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
       visible.forEach(({ game, rating }, i) => {
-        const x = toX(game, totalGames);
+        const x = toX(game);
         const y = toY(rating);
         if (i === 0) ctx.moveTo(x, y);
         else {
           const prev = visible[i - 1];
-          const px = toX(prev.game, totalGames);
+          const px = toX(prev.game);
           const py = toY(prev.rating);
           const cp = (x - px) * 0.45;
           ctx.bezierCurveTo(px + cp, py, x - cp, y, x, y);
@@ -237,12 +265,12 @@ export default function RatingGraph({
       // Outcome dots (skip index 0 = origin)
       visible.slice(1).forEach(({ game, rating, outcome }) => {
         if (!outcome) return;
-        const x = toX(game, totalGames);
+        const x = toX(game);
         const y = toY(rating);
         const col = OUTCOME_COLOR[outcome];
-        const r = outcome === "win" ? 4 : 3;
+        const dotR = outcome === "win" ? 4 : 3;
         ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.arc(x, y, dotR, 0, Math.PI * 2);
         ctx.fillStyle = col;
         ctx.fill();
         ctx.strokeStyle = isDark ? "#161614" : "#f5f2ed";
@@ -253,7 +281,7 @@ export default function RatingGraph({
       // Live cursor dot at tip
       if (prog >= 0.99 && visible.length >= 2) {
         const last = visible[visible.length - 1];
-        const x = toX(last.game, totalGames);
+        const x = toX(last.game);
         const y = toY(last.rating);
         ctx.beginPath();
         ctx.arc(x, y, 5, 0, Math.PI * 2);
@@ -268,7 +296,7 @@ export default function RatingGraph({
 
       // Hover crosshair
       if (hovered && prog >= 0.99) {
-        const x = toX(hovered.game, totalGames);
+        const x = toX(hovered.game);
         const y = toY(hovered.rating);
         ctx.save();
         ctx.strokeStyle = isDark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.15)";
@@ -302,20 +330,18 @@ export default function RatingGraph({
 
       // X tick labels (every N games)
       const xStep = totalGames <= 10 ? 1 : totalGames <= 30 ? 5 : 10;
-      for (let g = 0; g <= totalGames; g += xStep) {
-        if (g === 0) continue;
-        const x = toX(g, totalGames);
+      for (let g = 1; g <= totalGames; g += xStep) {
+        const x = toX(g);
         ctx.fillStyle = textColor;
         ctx.font = "500 8px system-ui,sans-serif";
         ctx.textAlign = "center";
         ctx.fillText(String(g), x, H - PAD.bottom + 11);
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [series, hovered, minR, maxR, totalGames, provisionalGames],
+    [series, hovered, minR, maxR, totalGames, provisionalGames, toX, toY],
   );
 
-  // ── Animation loop ────────────────────────────────────────────────────────
+  //  Animation loop
   useEffect(() => {
     startRef.current = null;
     setAnimProg(0);
@@ -323,7 +349,6 @@ export default function RatingGraph({
       if (!startRef.current) startRef.current = ts;
       const elapsed = ts - startRef.current;
       const p = Math.min(elapsed / ANIM_MS, 1);
-      // ease-out cubic
       const eased = 1 - Math.pow(1 - p, 3);
       setAnimProg(eased);
       if (p < 1) animRef.current = requestAnimationFrame(tick);
@@ -333,12 +358,12 @@ export default function RatingGraph({
     };
   }, [points]);
 
-  // ── Draw on every prog/hovered change ─────────────────────────────────────
+  //  Draw on every prog/hovered change
   useEffect(() => {
     draw(animProg);
   }, [draw, animProg]);
 
-  // ── DPR-aware canvas sizing ───────────────────────────────────────────────
+  //  DPR-aware canvas sizing
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -349,7 +374,7 @@ export default function RatingGraph({
     canvas.style.height = `${H}px`;
   }, []);
 
-  // ── Hit-test on mouse/touch ───────────────────────────────────────────────
+  //  Hit-test on mouse/touch
   const handlePointer = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (animProg < 0.99 || series.length < 2) return;
@@ -359,7 +384,7 @@ export default function RatingGraph({
       let closest: RatingPoint | null = null;
       let closestDist = Infinity;
       points.forEach((p) => {
-        const x = toX(p.game, totalGames);
+        const x = toX(p.game);
         const d = Math.abs(mx - x);
         if (d < closestDist) {
           closestDist = d;
@@ -369,13 +394,13 @@ export default function RatingGraph({
       if (closest && closestDist < 20) {
         const cp = closest as RatingPoint;
         setHovered(cp);
-        setHovX(toX(cp.game, totalGames));
+        setHovX(toX(cp.game));
         setHovY(toY(cp.rating));
       } else {
         setHovered(null);
       }
     },
-    [animProg, points, series.length, totalGames, toX, toY],
+    [animProg, points, series.length, toX, toY],
   );
 
   const tier = getTierLabel(currentRating);
@@ -420,7 +445,6 @@ export default function RatingGraph({
         {/* Delta chip */}
         {points.length > 0 &&
           (() => {
-            const first = points[0].rating;
             const delta = currentRating - startRating;
             const sign = delta >= 0 ? "+" : "";
             return (
