@@ -1,23 +1,28 @@
 /**
  * match_handler.js — Authoritative XO match handler for Nakama (JavaScript runtime)
- * op-code 1: all client→server messages (move, forfeit, resync)
- * Server always broadcasts full state after every change.
  *
- * Storage written by server:
- *   matches/{matchId}         — full match record (public read)
- *   user_matches/list         — per-user list of match IDs (private)
- *   profile/data              — wins/losses/draws/rating/streaks/gamesPlayed
- *   leaderboard xo_alltime    — Nakama native leaderboard, never resets
- *   leaderboard xo_monthly    — Nakama native leaderboard, resets monthly
+ * Logger color-coding convention (filter by prefix in Nakama log viewer):
+ *   [XO:INIT]  — teal   — Match lifecycle: born, params parsed, label set, module loaded
+ *   [XO:JOIN]  — blue   — Player join/attempt: symbol assigned, full-lobby detection, label→active
+ *   [XO:MOVE]  — purple — In-game actions: cell placed, board state, winner/draw detected
+ *   [XO:END]   — amber  — Game over: timeout awarded, forfeit triggered, end reason recorded
+ *   [XO:STORE] — coral  — Storage writes: profile, match record, user_matches, rating delta
+ *   [XO:ROOM]  — green  — Room CRUD: code created, record written/deleted, visibility flag
+ *   [XO:RPC]   — pink   — RPC entry/exit: caller, payload summary, matchId / error returned
+ *   [XO:LB]    — gray   — Leaderboard: submit attempt, threshold check, failure
+ *   [XO:WARN]  — red    — All warnings/errors: catch blocks, rejected joins, bad payloads
  *
- * RATING SYSTEM (provisional):
- *   - All players start at 800 (set by client setupUser)
- *   - Games 1–10: Win +30 / Loss −15 (high volatility, fast placement)
- *   - Games 11+:  Win +10 / Loss −5  (stable, incremental)
- *   - Draws:      No rating change
- *   - Floor:      0 (rating never goes negative)
- *   - gamesPlayed is incremented on every outcome and used server-side to
- *     determine the provisional window. The client mirrors this field for UI.
+ * Match label convention (drives listMatches filtering):
+ *   "waiting_public"   — 1 player in, publicly listed in room browser
+ *   "waiting_private"  — 1 player in, NOT listed (code/link only)
+ *   "active"           — 2 players in, game running (removed from browser)
+ *   "tic-tac-toe"      — legacy auto-matchmaker matches
+ *
+ * Storage collections:
+ *   matches/{matchId}        public read, server write — final match record
+ *   user_matches/list        private — per-user match id list
+ *   profile/data             public read — stats, rating
+ *   rooms/{roomCode}         public read, server write — code→matchId lookup
  */
 
 var WIN_LINES = [
@@ -37,7 +42,10 @@ var RATING_LOSS_EARLY = 15;
 var RATING_WIN_STABLE = 10;
 var RATING_LOSS_STABLE = 5;
 var RATING_FLOOR = 0;
-var RATING_START = 800; // mirrors setupUser default
+var RATING_START = 800;
+var SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+//  Pure helpers
 
 function checkWinner(board) {
   for (var i = 0; i < WIN_LINES.length; i++) {
@@ -60,20 +68,16 @@ function broadcast(nk, dispatcher, state, presences) {
   );
 }
 
-//  Leaderboard helpers
+function generateRoomCode() {
+  var chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
+  var code = "";
+  for (var i = 0; i < 6; i++)
+    code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
 
-/**
- * Submits wins (score) and rating (subscore) to both leaderboards.
- * Called server-side only — never from the client after a match.
- *
- * NOTE: Nakama's "BEST" operator only updates subscore when the primary score
- * also improves. If a player's win count doesn't change (e.g. on a draw or
- * loss), the rating change won't be reflected until they win again.
- * This is a known Nakama limitation. If you need rating to always update,
- * switch to using rating as the primary score field instead of wins.
- */
+//  Leaderboard
 
-// Change the signature
 function submitLeaderboard(
   nk,
   logger,
@@ -83,51 +87,59 @@ function submitLeaderboard(
   rating,
   gamesPlayed,
 ) {
-  // Block placement-phase players from appearing on leaderboard
+  // [XO:LB] Threshold check — skips submit if player has fewer than 5 games
   if (gamesPlayed < 5) {
     logger.info(
-      "[XO] Skipping leaderboard write for " +
+      "[XO:LB] Skipping leaderboard submit for " +
         userId.slice(0, 8) +
-        " — placement phase (" +
+        " — only " +
         gamesPlayed +
-        "/10 games)",
+        " game(s) played (threshold: 5)",
     );
     return;
   }
 
-  var displayName = username || "";
+  var name = username || "";
+
+  // [XO:LB] Writing all-time leaderboard record — score=wins, subscore=rating
   try {
-    nk.leaderboardRecordWrite(
-      "xo_alltime",
-      userId,
-      displayName,
-      wins,
-      rating,
-      {},
+    nk.leaderboardRecordWrite("xo_alltime", userId, name, wins, rating, {});
+    logger.info(
+      "[XO:LB] xo_alltime updated for " +
+        userId.slice(0, 8) +
+        " wins=" +
+        wins +
+        " rating=" +
+        rating,
     );
   } catch (e) {
-    logger.warn("[XO] leaderboard alltime write failed: " + e);
+    // [XO:WARN] xo_alltime write failed — leaderboard may be missing or misconfigured
+    logger.warn(
+      "[XO:WARN] xo_alltime write failed for " + userId.slice(0, 8) + ": " + e,
+    );
   }
+
+  // [XO:LB] Writing monthly leaderboard record — resets on cron "0 0 1 * *"
   try {
-    nk.leaderboardRecordWrite(
-      "xo_monthly",
-      userId,
-      displayName,
-      wins,
-      rating,
-      {},
+    nk.leaderboardRecordWrite("xo_monthly", userId, name, wins, rating, {});
+    logger.info(
+      "[XO:LB] xo_monthly updated for " +
+        userId.slice(0, 8) +
+        " wins=" +
+        wins +
+        " rating=" +
+        rating,
     );
   } catch (e) {
-    logger.warn("[XO] leaderboard monthly write failed: " + e);
+    // [XO:WARN] xo_monthly write failed — leaderboard may be missing or misconfigured
+    logger.warn(
+      "[XO:WARN] xo_monthly write failed for " + userId.slice(0, 8) + ": " + e,
+    );
   }
 }
 
 //  Storage helpers
 
-/**
- * Returns a blank profile object used when a player has no profile yet.
- * Keeps the default consistent between server and client (setupUser).
- */
 function defaultProfile(username) {
   return {
     username: username || null,
@@ -141,35 +153,146 @@ function defaultProfile(username) {
   };
 }
 
+function applyRatingDelta(rating, gamesBefore, won, drew) {
+  if (drew) return rating;
+  var early = gamesBefore < PROVISIONAL_GAMES;
+  if (won) return rating + (early ? RATING_WIN_EARLY : RATING_WIN_STABLE);
+  return Math.max(
+    RATING_FLOOR,
+    rating - (early ? RATING_LOSS_EARLY : RATING_LOSS_STABLE),
+  );
+}
+
 /**
- * Apply provisional or stable rating delta for a single outcome.
- * Returns the new rating (clamped to RATING_FLOOR).
+ * [XO:ROOM] Write rooms/{roomCode} + room_index/{matchId} under SYSTEM_USER_ID.
+ * rooms/{roomCode}     -- code->matchId forward lookup (used by rpcJoinByCode)
+ * room_index/{matchId} -- matchId->room metadata reverse lookup (used by rpcListPublicRooms)
+ * Both records are deleted together when the room is torn down.
  */
-function applyRatingDelta(currentRating, gamesPlayedBefore, won, drew) {
-  if (drew) return currentRating; // draws: no change
+function writeRoomRecord(nk, logger, roomCode, matchId, hostUserId, isPublic) {
+  // Resolve host display username so browse list shows "X's room" without extra RPC
+  var hostUsername = null;
+  try {
+    var pr = nk.storageRead([
+      { collection: "profile", key: "data", userId: hostUserId },
+    ]);
+    if (pr.length > 0 && pr[0].value.username) {
+      hostUsername = pr[0].value.username;
+    }
+  } catch (_) {
+    // non-fatal -- browse falls back to userId slice
+  }
 
-  var isEarly = gamesPlayedBefore < PROVISIONAL_GAMES;
+  var createdAt = Date.now();
 
-  if (won) {
-    return currentRating + (isEarly ? RATING_WIN_EARLY : RATING_WIN_STABLE);
-  } else {
-    var penalty = isEarly ? RATING_LOSS_EARLY : RATING_LOSS_STABLE;
-    return Math.max(RATING_FLOOR, currentRating - penalty);
+  try {
+    nk.storageWrite([
+      // Forward lookup: code -> matchId
+      {
+        collection: "rooms",
+        key: roomCode,
+        userId: SYSTEM_USER_ID,
+        value: {
+          matchId: matchId,
+          hostUserId: hostUserId,
+          isPublic: isPublic,
+          createdAt: createdAt,
+        },
+        permissionRead: 2,
+        permissionWrite: 0,
+      },
+      // Reverse lookup: matchId -> full room metadata (for rpcListPublicRooms)
+      {
+        collection: "room_index",
+        key: matchId,
+        userId: SYSTEM_USER_ID,
+        value: {
+          roomCode: roomCode,
+          hostUserId: hostUserId,
+          hostUsername: hostUsername,
+          isPublic: isPublic,
+          createdAt: createdAt,
+        },
+        permissionRead: 2,
+        permissionWrite: 0,
+      },
+    ]);
+    // [XO:ROOM] Both records written -- forward (code->match) + reverse (match->meta)
+    logger.info(
+      "[XO:ROOM] Written code=" +
+        roomCode +
+        " matchId=" +
+        matchId.slice(0, 8) +
+        " host=" +
+        hostUserId.slice(0, 8) +
+        " (" +
+        (hostUsername || "no-username") +
+        ")" +
+        " public=" +
+        isPublic,
+    );
+  } catch (e) {
+    // [XO:WARN] storageWrite failed -- join-by-code will return not_found for this room
+    logger.warn("[XO:WARN] writeRoomRecord failed code=" + roomCode + ": " + e);
   }
 }
 
-function saveMatchResult(ctx, nk, logger, state, endReason) {
-  var matchId = state.matchId;
-  var openingCell = state.moves.length > 0 ? state.moves[0] : null;
+/**
+ * [XO:ROOM] Delete rooms/{roomCode} — called when second player joins or match ends.
+ * Consecutive actions: storageDelete → log success or warn on failure.
+ */
+function deleteRoomRecord(nk, logger, roomCode, matchId) {
+  if (!roomCode) return;
+  var toDelete = [
+    { collection: "rooms", key: roomCode, userId: SYSTEM_USER_ID },
+  ];
+  // Also remove the reverse-lookup index if matchId is provided
+  if (matchId) {
+    toDelete.push({
+      collection: "room_index",
+      key: matchId,
+      userId: SYSTEM_USER_ID,
+    });
+  }
+  try {
+    nk.storageDelete(toDelete);
+    // [XO:ROOM] Room records deleted -- code + index no longer resolve
+    logger.info(
+      "[XO:ROOM] Deleted code=" +
+        roomCode +
+        (matchId ? " matchId=" + matchId.slice(0, 8) : ""),
+    );
+  } catch (e) {
+    // [XO:WARN] storageDelete failed -- stale room record may linger until match terminates
+    logger.warn(
+      "[XO:WARN] deleteRoomRecord failed code=" + roomCode + ": " + e,
+    );
+  }
+}
 
-  //  Write match record (public readable)
+/**
+ * [XO:STORE] Persist final match outcome for both players.
+ * Consecutive actions per player:
+ *   1. deleteRoomRecord (room cleanup)
+ *   2. storageWrite matches/{matchId} (canonical match record)
+ *   3. storageRead + storageWrite user_matches/list (append matchId to history)
+ *   4. storageRead profile/data (or create default)
+ *   5. Apply win/loss/draw counters + rating delta
+ *   6. storageWrite profile/data
+ *   7. submitLeaderboard (threshold-gated)
+ */
+function saveMatchResult(ctx, nk, logger, state, endReason) {
+  // [XO:ROOM] Cleaning up room record before persisting result
+  deleteRoomRecord(nk, logger, state.roomCode || null, state.matchId || null);
+
+  // [XO:STORE] Writing canonical match record — winner, moves, end reason
   try {
     nk.storageWrite([
       {
         collection: "matches",
-        key: matchId,
+        key: state.matchId,
         value: {
-          matchId: matchId,
+          matchId: state.matchId,
           players: state.players.map(function (p) {
             return {
               userId: p.userId,
@@ -179,94 +302,115 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
           }),
           moves: state.moves,
           winner: state.winner,
-          endReason: endReason, // "win" | "draw" | "timeout" | "forfeit"
-          openingCell: openingCell,
+          endReason: endReason,
+          openingCell: state.moves.length > 0 ? state.moves[0] : null,
           createdAt: Date.now(),
         },
         permissionRead: 2,
         permissionWrite: 0,
       },
     ]);
+    logger.info(
+      "[XO:STORE] Match record saved matchId=" +
+        state.matchId.slice(0, 8) +
+        " winner=" +
+        state.winner +
+        " reason=" +
+        endReason +
+        " moves=" +
+        state.moves.length,
+    );
   } catch (e) {
-    logger.warn("[XO] match write failed: " + e);
+    // [XO:WARN] Match record write failed — result will not appear in match history
+    logger.warn(
+      "[XO:WARN] Match record write failed matchId=" +
+        state.matchId.slice(0, 8) +
+        ": " +
+        e,
+    );
   }
 
-  //  Per-player: update match list, profile stats, and leaderboard
   for (var i = 0; i < state.players.length; i++) {
     var player = state.players[i];
-    var userId = player.userId;
-    var symbol = player.symbol;
-    var won = state.winner !== "draw" && state.winner === symbol;
+    var uid = player.userId;
+    var won = state.winner !== "draw" && state.winner === player.symbol;
     var drew = state.winner === "draw";
 
-    //  Append to user_matches list
+    // [XO:STORE] Reading user_matches/list to prepend new matchId
     var history = [];
     try {
-      var res = nk.storageRead([
-        { collection: "user_matches", key: "list", userId: userId },
+      var r = nk.storageRead([
+        { collection: "user_matches", key: "list", userId: uid },
       ]);
-      if (res.length > 0) history = res[0].value.matches || [];
-    } catch (e) {
+      if (r.length > 0) history = r[0].value.matches || [];
+    } catch (_) {
+      // [XO:WARN] user_matches read failed — starting fresh history for this player
       logger.warn(
-        "[XO] user_matches read failed for " + userId.slice(0, 8) + ": " + e,
+        "[XO:WARN] user_matches read failed for " +
+          uid.slice(0, 8) +
+          " — using empty list",
       );
     }
 
-    history.unshift(matchId);
+    history.unshift(state.matchId);
     if (history.length > 200) history = history.slice(0, 200);
 
+    // [XO:STORE] Writing updated match history list (capped at 200 entries)
     try {
       nk.storageWrite([
         {
           collection: "user_matches",
           key: "list",
-          userId: userId,
+          userId: uid,
           value: { matches: history },
           permissionRead: 1,
           permissionWrite: 1,
         },
       ]);
-    } catch (e) {
-      logger.warn(
-        "[XO] user_matches write failed for " + userId.slice(0, 8) + ": " + e,
+      logger.info(
+        "[XO:STORE] user_matches updated for " +
+          uid.slice(0, 8) +
+          " total=" +
+          history.length,
       );
+    } catch (_) {
+      // [XO:WARN] user_matches write failed — match won't appear in player's history
+      logger.warn("[XO:WARN] user_matches write failed for " + uid.slice(0, 8));
     }
 
-    //  Read profile (or initialise default if missing)
+    // [XO:STORE] Reading profile to apply stats + rating delta
     var profile;
     try {
-      var pres = nk.storageRead([
-        { collection: "profile", key: "data", userId: userId },
+      var pr = nk.storageRead([
+        { collection: "profile", key: "data", userId: uid },
       ]);
-      if (pres.length > 0) {
-        profile = pres[0].value;
-      } else {
+      profile =
+        pr.length > 0 ? pr[0].value : defaultProfile(player.username || null);
+      if (pr.length === 0) {
         logger.info(
-          "[XO] No profile found for " +
-            userId.slice(0, 8) +
-            " — initialising defaults",
+          "[XO:STORE] No existing profile for " +
+            uid.slice(0, 8) +
+            " — initialising default (rating=" +
+            RATING_START +
+            ")",
         );
-        profile = defaultProfile(player.username || null);
       }
-    } catch (e) {
+    } catch (_) {
+      // [XO:WARN] Profile read failed — using default to avoid blocking stat update
       logger.warn(
-        "[XO] profile read failed for " + userId.slice(0, 8) + ": " + e,
+        "[XO:WARN] Profile read failed for " +
+          uid.slice(0, 8) +
+          " — using default",
       );
       profile = defaultProfile(player.username || null);
     }
 
-    // Ensure gamesPlayed exists on legacy profiles (created before this field)
-    if (typeof profile.gamesPlayed !== "number") {
+    if (typeof profile.gamesPlayed !== "number")
       profile.gamesPlayed = profile.wins + profile.losses + profile.draws;
-    }
+    if (typeof profile.rating !== "number") profile.rating = RATING_START;
 
-    // Ensure rating exists on legacy profiles
-    if (typeof profile.rating !== "number") {
-      profile.rating = RATING_START;
-    }
-
-    //  Mutate stats
-    var gamesBeforeThis = profile.gamesPlayed;
+    var before = profile.gamesPlayed;
+    var prevRating = profile.rating;
 
     if (drew) {
       profile.draws = (profile.draws || 0) + 1;
@@ -276,58 +420,48 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
       profile.winStreak = (profile.winStreak || 0) + 1;
       profile.bestStreak = Math.max(profile.bestStreak || 0, profile.winStreak);
     } else {
-      // Loss
       profile.losses = (profile.losses || 0) + 1;
       profile.winStreak = 0;
     }
 
-    // Apply rating delta — uses gamesBeforeThis so provisional window is exact
-    profile.rating = applyRatingDelta(
-      profile.rating,
-      gamesBeforeThis,
-      won,
-      drew,
-    );
+    profile.rating = applyRatingDelta(profile.rating, before, won, drew);
+    profile.gamesPlayed = before + 1;
 
-    // Increment gamesPlayed after computing the delta
-    profile.gamesPlayed = gamesBeforeThis + 1;
-
-    logger.info(
-      "[XO] " +
-        userId.slice(0, 8) +
-        " outcome=" +
-        (drew ? "draw" : won ? "win" : "loss") +
-        " provisional=" +
-        (gamesBeforeThis < PROVISIONAL_GAMES) +
-        " rating=" +
-        profile.rating +
-        " gamesPlayed=" +
-        profile.gamesPlayed,
-    );
-
-    //  Write updated profile back
+    // [XO:STORE] Writing updated profile — new rating, streak, win/loss/draw count
     try {
       nk.storageWrite([
         {
           collection: "profile",
           key: "data",
-          userId: userId,
+          userId: uid,
           value: profile,
           permissionRead: 2,
           permissionWrite: 1,
         },
       ]);
-    } catch (e) {
-      logger.warn(
-        "[XO] profile write failed for " + userId.slice(0, 8) + ": " + e,
+      logger.info(
+        "[XO:STORE] Profile updated " +
+          uid.slice(0, 8) +
+          " outcome=" +
+          (drew ? "draw" : won ? "win" : "loss") +
+          " rating=" +
+          prevRating +
+          "→" +
+          profile.rating +
+          " streak=" +
+          profile.winStreak +
+          " gamesPlayed=" +
+          profile.gamesPlayed,
       );
+    } catch (_) {
+      // [XO:WARN] Profile write failed — stats not persisted for this player this game
+      logger.warn("[XO:WARN] Profile write failed for " + uid.slice(0, 8));
     }
 
-    //  Submit to leaderboards (server-side only)
     submitLeaderboard(
       nk,
       logger,
-      userId,
+      uid,
       profile.username || null,
       profile.wins || 0,
       profile.rating,
@@ -336,22 +470,55 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
   }
 }
 
-//  Lifecycle
+//  Match lifecycle
 
 function matchInit(ctx, logger, nk, params) {
-  logger.info("[XO] matchInit matchId=" + ctx.matchId);
+  var isRoom =
+    params && (params.isPublic === "true" || params.isPublic === "false");
+  var isPublic = params && params.isPublic === "true";
+  var roomCode = params && params.roomCode ? params.roomCode : null;
+  var hostUserId = params && params.hostUserId ? params.hostUserId : null;
+
+  var label = isRoom
+    ? isPublic
+      ? "waiting_public"
+      : "waiting_private"
+    : "tic-tac-toe";
+
+  // [XO:INIT] Match created — params parsed, initial label set, state zeroed
+  logger.info(
+    "[XO:INIT] matchInit matchId=" +
+      ctx.matchId.slice(0, 8) +
+      " label=" +
+      label +
+      " isRoom=" +
+      isRoom +
+      " isPublic=" +
+      isPublic +
+      (roomCode ? " roomCode=" + roomCode : "") +
+      (hostUserId ? " host=" + hostUserId.slice(0, 8) : ""),
+  );
+
+  if (roomCode && hostUserId) {
+    // [XO:ROOM] Writing room record immediately after matchInit so join-by-code resolves
+    writeRoomRecord(nk, logger, roomCode, ctx.matchId, hostUserId, isPublic);
+  }
+
   return {
     state: {
-      board: [null, null, null, null, null, null, null, null, null],
+      board: Array(9).fill(null),
       players: [],
       turn: null,
       winner: null,
       moves: [],
       matchId: ctx.matchId,
       turnStartTime: Date.now(),
+      roomCode: roomCode,
+      isPublic: isPublic,
+      label: label,
     },
     tickRate: 1,
-    label: "tic-tac-toe",
+    label: label,
   };
 }
 
@@ -365,16 +532,39 @@ function matchJoinAttempt(
   presence,
   metadata,
 ) {
-  var alreadyIn = false;
+  // [XO:JOIN] Rejoin check — existing player re-connecting, always accepted
   for (var i = 0; i < state.players.length; i++) {
     if (state.players[i].userId === presence.userId) {
-      alreadyIn = true;
-      break;
+      logger.info(
+        "[XO:JOIN] Rejoin accepted user=" +
+          presence.userId.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
+      return { state: state, accept: true };
     }
   }
-  if (!alreadyIn && state.players.length >= 2) {
+
+  // [XO:JOIN] Match full — rejecting third joiner
+  if (state.players.length >= 2) {
+    logger.info(
+      "[XO:JOIN] Rejected (full) user=" +
+        presence.userId.slice(0, 8) +
+        " matchId=" +
+        ctx.matchId.slice(0, 8),
+    );
     return { state: state, accept: false, rejectMessage: "Match is full" };
   }
+
+  // [XO:JOIN] New player accepted — slot available
+  logger.info(
+    "[XO:JOIN] Accepted new player user=" +
+      presence.userId.slice(0, 8) +
+      " matchId=" +
+      ctx.matchId.slice(0, 8) +
+      " currentPlayers=" +
+      state.players.length,
+  );
   return { state: state, accept: true };
 }
 
@@ -389,31 +579,72 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
       }
     }
     if (!alreadyIn && state.players.length < 2) {
-      var symbol = state.players.length === 0 ? "X" : "O";
       state.players.push({
         userId: p.userId,
-        symbol: symbol,
+        symbol: state.players.length === 0 ? "X" : "O",
         username: p.username,
       });
-      logger.info("[XO] " + p.username + " joined as " + symbol);
-    } else if (alreadyIn) {
-      logger.info("[XO] " + p.username + " reconnected");
+      var assignedSymbol = state.players[state.players.length - 1].symbol;
+      // [XO:JOIN] Player added to roster — symbol assigned, slot count updated
+      logger.info(
+        "[XO:JOIN] " +
+          p.username +
+          " (user=" +
+          p.userId.slice(0, 8) +
+          ") joined as " +
+          assignedSymbol +
+          " matchId=" +
+          ctx.matchId.slice(0, 8) +
+          " players=" +
+          state.players.length +
+          "/2",
+      );
     }
   }
 
-  if (state.players.length === 2 && !state.turn) {
-    state.turn = state.players[0].userId;
-    state.turnStartTime = Date.now();
-    logger.info("[XO] Game started — first turn: " + state.turn.slice(0, 8));
+  if (state.players.length === 2) {
+    if (!state.turn) {
+      state.turn = state.players[0].userId;
+      state.turnStartTime = Date.now();
+      // [XO:JOIN] Both players present — first turn assigned to X player
+      logger.info(
+        "[XO:JOIN] First turn assigned to " +
+          state.players[0].username +
+          " (X) matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
+    }
+    if (state.label !== "tic-tac-toe" && state.label !== "active") {
+      state.label = "active";
+      dispatcher.matchLabelUpdate("active");
+      // [XO:INIT] Label promoted to active — match removed from public room browser
+      logger.info(
+        "[XO:INIT] Label → active matchId=" +
+          ctx.matchId.slice(0, 8) +
+          " (was " +
+          (state.roomCode ? "room" : "matchmaker") +
+          ")",
+      );
+      // [XO:ROOM] Second player in — deleting room code, no longer needed
+      deleteRoomRecord(nk, logger, state.roomCode, ctx.matchId);
+    }
+    broadcast(nk, dispatcher, state);
   }
 
-  if (state.players.length === 2) broadcast(nk, dispatcher, state);
   return { state: state };
 }
 
 function matchLeave(ctx, logger, nk, dispatcher, tick, state, presences) {
   for (var i = 0; i < presences.length; i++) {
-    logger.info("[XO] " + presences[i].username + " left");
+    // [XO:JOIN] Player disconnected — game continues; forfeit/timeout may follow
+    logger.info(
+      "[XO:JOIN] Player left user=" +
+        presences[i].userId.slice(0, 8) +
+        " matchId=" +
+        ctx.matchId.slice(0, 8) +
+        " winner=" +
+        (state.winner || "none"),
+    );
   }
   return { state: state };
 }
@@ -421,33 +652,34 @@ function matchLeave(ctx, logger, nk, dispatcher, tick, state, presences) {
 function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
   if (state.winner !== null) return { state: state };
 
-  var TURN_LIMIT = 30000;
-
-  //  Timeout check
-  if (state.turn && !state.winner) {
-    var elapsed = Date.now() - state.turnStartTime;
-    if (elapsed > TURN_LIMIT) {
-      logger.info("[XO] Turn timeout for " + state.turn.slice(0, 8));
-      var winnerPlayer = null;
-      for (var i = 0; i < state.players.length; i++) {
-        if (state.players[i].userId !== state.turn) {
-          winnerPlayer = state.players[i];
-          break;
-        }
-      }
-      if (winnerPlayer) {
-        state.winner = winnerPlayer.symbol;
+  //  Turn timeout check
+  if (state.turn && Date.now() - state.turnStartTime > 30000) {
+    for (var i = 0; i < state.players.length; i++) {
+      if (state.players[i].userId !== state.turn) {
+        state.winner = state.players[i].symbol;
         state.turnStartTime = 0;
-        logger.info("[XO] Timeout — winner: " + state.winner);
+
+        // [XO:END] Timeout expired (>30 s) — opponent awarded the win
+        logger.info(
+          "[XO:END] Timeout: " +
+            state.turn.slice(0, 8) +
+            " ran out of time → winner=" +
+            state.winner +
+            " matchId=" +
+            ctx.matchId.slice(0, 8),
+        );
+
         try {
           saveMatchResult(ctx, nk, logger, state, "timeout");
         } catch (e) {
-          logger.error("[XO] saveMatchResult: " + e);
+          // [XO:WARN] saveMatchResult threw after timeout — result may not be persisted
+          logger.warn("[XO:WARN] saveMatchResult failed after timeout: " + e);
         }
         broadcast(nk, dispatcher, state);
+        break;
       }
-      return { state: state };
     }
+    return { state: state };
   }
 
   //  Process messages
@@ -456,127 +688,187 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     var data;
     try {
       data = JSON.parse(nk.binaryToString(msg.data));
-    } catch (e) {
-      logger.warn("[XO] Bad payload: " + e);
+    } catch (_) {
+      // [XO:WARN] Malformed message received — non-JSON payload, skipping
+      logger.warn(
+        "[XO:WARN] Bad message payload from user=" +
+          msg.sender.userId.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
       continue;
     }
 
-    // Resync
+    //  Resync request
     if (typeof data.index === "undefined" && !data.forfeit) {
-      logger.info("[XO] Resync from " + msg.sender.userId.slice(0, 8));
+      // [XO:JOIN] Client requested resync — broadcasting current state back to sender
+      logger.info(
+        "[XO:JOIN] Resync sent to user=" +
+          msg.sender.userId.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
       broadcast(nk, dispatcher, state, [msg.sender]);
       continue;
     }
 
-    // Forfeit
+    //  Forfeit
     if (data.forfeit === true) {
       if (state.winner) continue;
-      var forfeitingPlayer = null;
-      var winningPlayer = null;
+
+      var wp = null;
       for (var j = 0; j < state.players.length; j++) {
-        if (state.players[j].userId === msg.sender.userId)
-          forfeitingPlayer = state.players[j];
-        else winningPlayer = state.players[j];
+        if (state.players[j].userId !== msg.sender.userId) {
+          wp = state.players[j];
+          break;
+        }
       }
-      if (!forfeitingPlayer || !winningPlayer) continue;
-      state.winner = winningPlayer.symbol;
+      if (!wp) continue;
+
+      state.winner = wp.symbol;
       state.turnStartTime = 0;
+
+      // [XO:END] Forfeit received — forfeiting player concedes, opponent wins
       logger.info(
-        "[XO] " +
-          forfeitingPlayer.symbol +
-          " forfeited — " +
-          winningPlayer.symbol +
-          " wins",
+        "[XO:END] Forfeit by user=" +
+          msg.sender.userId.slice(0, 8) +
+          " → winner=" +
+          state.winner +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
       );
+
       try {
         saveMatchResult(ctx, nk, logger, state, "forfeit");
       } catch (e) {
-        logger.error("[XO] saveMatchResult: " + e);
+        // [XO:WARN] saveMatchResult threw after forfeit — result may not be persisted
+        logger.warn("[XO:WARN] saveMatchResult failed after forfeit: " + e);
       }
       broadcast(nk, dispatcher, state);
       continue;
     }
 
-    // Move
-    if (state.winner) continue;
-    if (msg.sender.userId !== state.turn) {
-      logger.warn("[XO] Out-of-turn from " + msg.sender.userId.slice(0, 8));
-      continue;
-    }
+    //  Move
+    if (state.winner || msg.sender.userId !== state.turn) continue;
+    var idx = data.index;
 
-    var index = data.index;
     if (
-      typeof index !== "number" ||
-      index < 0 ||
-      index > 8 ||
-      index !== Math.floor(index)
+      typeof idx !== "number" ||
+      idx < 0 ||
+      idx > 8 ||
+      idx !== Math.floor(idx)
     ) {
-      logger.warn("[XO] Invalid index " + index);
-      continue;
-    }
-    if (state.board[index] !== null) {
-      logger.warn("[XO] Cell " + index + " occupied");
+      // [XO:WARN] Invalid move index — out of range or non-integer, ignoring
+      logger.warn(
+        "[XO:WARN] Invalid index=" +
+          idx +
+          " from user=" +
+          msg.sender.userId.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
       continue;
     }
 
-    var currentPlayer = null;
+    if (state.board[idx] !== null) {
+      // [XO:WARN] Move on occupied cell — client sent duplicate or stale move
+      logger.warn(
+        "[XO:WARN] Cell already occupied idx=" +
+          idx +
+          " by user=" +
+          msg.sender.userId.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
+      continue;
+    }
+
+    var cp = null;
     for (var k = 0; k < state.players.length; k++) {
       if (state.players[k].userId === state.turn) {
-        currentPlayer = state.players[k];
+        cp = state.players[k];
         break;
       }
     }
-    if (!currentPlayer) continue;
+    if (!cp) continue;
 
-    state.board[index] = currentPlayer.symbol;
-    state.moves.push(index);
+    state.board[idx] = cp.symbol;
+    state.moves.push(idx);
+
+    // [XO:MOVE] Move applied — cell marked, checking for win or draw
     logger.info(
-      "[XO] " +
-        currentPlayer.symbol +
-        " played cell " +
-        index +
-        " (move #" +
+      "[XO:MOVE] " +
+        cp.username +
+        " (user=" +
+        cp.userId.slice(0, 8) +
+        ") placed " +
+        cp.symbol +
+        " at idx=" +
+        idx +
+        " moveNo=" +
         state.moves.length +
-        ")",
+        " matchId=" +
+        ctx.matchId.slice(0, 8),
     );
 
     var winner = checkWinner(state.board);
     if (winner) {
       state.winner = winner;
       state.turnStartTime = 0;
-      logger.info("[XO] Winner: " + winner);
+
+      // [XO:END] Win condition met — winning line found, match over
+      logger.info(
+        "[XO:END] Winner=" +
+          winner +
+          " after " +
+          state.moves.length +
+          " move(s) matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
+
       try {
         saveMatchResult(ctx, nk, logger, state, "win");
       } catch (e) {
-        logger.error("[XO] saveMatchResult: " + e);
+        // [XO:WARN] saveMatchResult threw after win — result may not be persisted
+        logger.warn("[XO:WARN] saveMatchResult failed after win: " + e);
+      }
+    } else if (
+      state.board.every(function (c) {
+        return c !== null;
+      })
+    ) {
+      state.winner = "draw";
+      state.turnStartTime = 0;
+
+      // [XO:END] Board full, no winner — draw recorded
+      logger.info(
+        "[XO:END] Draw after " +
+          state.moves.length +
+          " move(s) matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
+
+      try {
+        saveMatchResult(ctx, nk, logger, state, "draw");
+      } catch (e) {
+        // [XO:WARN] saveMatchResult threw after draw — result may not be persisted
+        logger.warn("[XO:WARN] saveMatchResult failed after draw: " + e);
       }
     } else {
-      var hasNull = false;
-      for (var m = 0; m < state.board.length; m++) {
-        if (state.board[m] === null) {
-          hasNull = true;
+      // [XO:MOVE] Switching turn — no terminal condition, next player's clock starts
+      for (var n = 0; n < state.players.length; n++) {
+        if (state.players[n].userId !== state.turn) {
+          state.turn = state.players[n].userId;
           break;
         }
       }
-      if (!hasNull) {
-        state.winner = "draw";
-        state.turnStartTime = 0;
-        logger.info("[XO] Draw");
-        try {
-          saveMatchResult(ctx, nk, logger, state, "draw");
-        } catch (e) {
-          logger.error("[XO] saveMatchResult: " + e);
-        }
-      } else {
-        for (var n = 0; n < state.players.length; n++) {
-          if (state.players[n].userId !== state.turn) {
-            state.turn = state.players[n].userId;
-            break;
-          }
-        }
-        state.turnStartTime = Date.now();
-        logger.info("[XO] Next turn: " + state.turn.slice(0, 8));
-      }
+      state.turnStartTime = Date.now();
+      logger.info(
+        "[XO:MOVE] Turn → " +
+          state.turn.slice(0, 8) +
+          " matchId=" +
+          ctx.matchId.slice(0, 8),
+      );
     }
 
     broadcast(nk, dispatcher, state);
@@ -595,49 +887,379 @@ function matchTerminate(
   state,
   graceSeconds,
 ) {
-  logger.info("[XO] matchTerminate grace=" + graceSeconds);
+  // [XO:INIT] Match terminating — cleaning up room record if still present
+  logger.info(
+    "[XO:INIT] matchTerminate matchId=" +
+      ctx.matchId.slice(0, 8) +
+      " graceSeconds=" +
+      graceSeconds +
+      " winner=" +
+      (state.winner || "none"),
+  );
+  deleteRoomRecord(nk, logger, state.roomCode || null, ctx.matchId || null);
   return { state: state };
 }
 
 function matchSignal(ctx, logger, nk, dispatcher, tick, state, data) {
+  // [XO:INIT] Signal received — no-op handler, logging for observability
+  logger.info(
+    "[XO:INIT] matchSignal matchId=" +
+      ctx.matchId.slice(0, 8) +
+      " data=" +
+      data,
+  );
   return { state: state };
 }
 
 function matchmakerMatched(ctx, logger, nk, matches) {
-  logger.info("[XO] matchmakerMatched — " + matches.length + " players");
+  // [XO:INIT] Matchmaker matched — creating authoritative match for paired players
+  logger.info(
+    "[XO:INIT] matchmakerMatched players=" +
+      matches.length +
+      " creating xo match",
+  );
   try {
-    return nk.matchCreate("xo");
+    var mid = nk.matchCreate("xo", {});
+    logger.info("[XO:INIT] matchmakerMatched → matchId=" + mid.slice(0, 8));
+    return mid;
   } catch (e) {
-    logger.error("[XO] matchCreate failed: " + e);
+    // [XO:WARN] matchCreate failed — matchmaker players will not get a game
+    logger.error("[XO:WARN] matchCreate failed in matchmakerMatched: " + e);
     throw e;
   }
 }
 
-//  Leaderboard initialisation (run once on module load)
+//  RPCs
+
+/**
+ * xo_create_room
+ * Body:     { isPublic: boolean }
+ * Returns:  { matchId, roomCode, isPublic }
+ *
+ * [XO:RPC] Consecutive actions:
+ *   1. Parse payload — error if invalid JSON
+ *   2. Generate room code (6-char, no ambiguous chars)
+ *   3. nk.matchCreate("xo", { isPublic, roomCode, hostUserId })
+ *   4. Return { matchId, roomCode, isPublic } to client
+ *   (writeRoomRecord fires inside matchInit via params)
+ */
+function rpcCreateRoom(ctx, logger, nk, payload) {
+  // [XO:RPC] rpcCreateRoom called — parsing payload
+  var data;
+  try {
+    data = JSON.parse(payload);
+  } catch (_) {
+    // [XO:WARN] Bad JSON in rpcCreateRoom payload
+    logger.warn(
+      "[XO:WARN] rpcCreateRoom invalid JSON from user=" +
+        ctx.userId.slice(0, 8),
+    );
+    throw new Error("Invalid JSON");
+  }
+
+  var isPublic = data.isPublic === true;
+  var roomCode = generateRoomCode();
+  var hostUserId = ctx.userId;
+
+  logger.info(
+    "[XO:RPC] rpcCreateRoom user=" +
+      hostUserId.slice(0, 8) +
+      " isPublic=" +
+      isPublic +
+      " generatedCode=" +
+      roomCode,
+  );
+
+  var matchId;
+  try {
+    matchId = nk.matchCreate("xo", {
+      isPublic: isPublic ? "true" : "false",
+      roomCode: roomCode,
+      hostUserId: hostUserId,
+    });
+    // [XO:RPC] Match created successfully — returning matchId + code to client
+    logger.info(
+      "[XO:RPC] rpcCreateRoom → matchId=" +
+        matchId.slice(0, 8) +
+        " code=" +
+        roomCode +
+        " public=" +
+        isPublic,
+    );
+  } catch (e) {
+    // [XO:WARN] matchCreate failed in rpcCreateRoom — client will not receive a matchId
+    logger.error(
+      "[XO:WARN] rpcCreateRoom matchCreate failed for user=" +
+        hostUserId.slice(0, 8) +
+        ": " +
+        e,
+    );
+    throw e;
+  }
+
+  return JSON.stringify({
+    matchId: matchId,
+    roomCode: roomCode,
+    isPublic: isPublic,
+  });
+}
+
+/**
+ * xo_join_by_code
+ * Body:     { roomCode: string }
+ * Returns:  { matchId: string }   on success
+ *           { error: "not_found" | "full" }  on failure
+ *
+ * [XO:RPC] Consecutive actions:
+ *   1. Parse payload + validate roomCode
+ *   2. storageRead rooms/{code} under SYSTEM_USER_ID
+ *   3. nk.matchList to verify match is live and has a free slot
+ *   4. Return { matchId } or { error }
+ */
+function rpcJoinByCode(ctx, logger, nk, payload) {
+  var data;
+  try {
+    data = JSON.parse(payload);
+  } catch (_) {
+    // [XO:WARN] Bad JSON in rpcJoinByCode payload
+    logger.warn(
+      "[XO:WARN] rpcJoinByCode invalid JSON from user=" +
+        ctx.userId.slice(0, 8),
+    );
+    throw new Error("Invalid JSON");
+  }
+
+  var code = (data.roomCode || "").toUpperCase().trim();
+  if (!code) {
+    logger.warn(
+      "[XO:WARN] rpcJoinByCode missing roomCode from user=" +
+        ctx.userId.slice(0, 8),
+    );
+    throw new Error("roomCode required");
+  }
+
+  // [XO:RPC] rpcJoinByCode called — looking up room code in storage
+  logger.info(
+    "[XO:RPC] rpcJoinByCode user=" + ctx.userId.slice(0, 8) + " code=" + code,
+  );
+
+  var records;
+  try {
+    records = nk.storageRead([
+      {
+        collection: "rooms",
+        key: code,
+        userId: SYSTEM_USER_ID,
+      },
+    ]);
+  } catch (e) {
+    // [XO:WARN] storageRead failed in rpcJoinByCode — treating as not_found
+    logger.warn(
+      "[XO:WARN] rpcJoinByCode storageRead failed code=" + code + ": " + e,
+    );
+    return JSON.stringify({ error: "not_found" });
+  }
+
+  if (!records || records.length === 0) {
+    // [XO:RPC] Room code not found in storage — returning not_found to client
+    logger.info("[XO:RPC] rpcJoinByCode not_found for code=" + code);
+    return JSON.stringify({ error: "not_found" });
+  }
+
+  var record = records[0].value;
+  var matchId = record.matchId;
+
+  // [XO:RPC] Room record found — verifying match is live and has a free slot
+  try {
+    var liveMatches = nk.matchList(50, true, null, 0, 2, "*");
+    var found = false,
+      full = false;
+    for (var i = 0; i < liveMatches.length; i++) {
+      if (liveMatches[i].matchId === matchId) {
+        found = true;
+        if (liveMatches[i].size >= 2) full = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      // [XO:RPC] matchId from room record is no longer live — cleaning up stale record
+      logger.info(
+        "[XO:RPC] rpcJoinByCode stale record code=" +
+          code +
+          " matchId=" +
+          matchId.slice(0, 8) +
+          " → not_found",
+      );
+      deleteRoomRecord(nk, logger, code);
+      return JSON.stringify({ error: "not_found" });
+    }
+
+    if (full) {
+      // [XO:RPC] Match found but already has 2 players — returning full to client
+      logger.info(
+        "[XO:RPC] rpcJoinByCode match full code=" +
+          code +
+          " matchId=" +
+          matchId.slice(0, 8),
+      );
+      return JSON.stringify({ error: "full" });
+    }
+  } catch (e) {
+    // [XO:WARN] matchList failed — returning matchId anyway, joinMatch will validate
+    logger.warn(
+      "[XO:WARN] rpcJoinByCode matchList failed for code=" +
+        code +
+        ": " +
+        e +
+        " — returning matchId speculatively",
+    );
+  }
+
+  // [XO:RPC] Resolved successfully — returning matchId to client for joinMatch()
+  logger.info(
+    "[XO:RPC] rpcJoinByCode resolved code=" +
+      code +
+      " → matchId=" +
+      matchId.slice(0, 8),
+  );
+  return JSON.stringify({ matchId: matchId });
+}
+
+/**
+ * xo_list_public_rooms
+ * Body:     {} (empty)
+ * Returns:  { rooms: [{ matchId, roomCode, hostUserId, createdAt, size }] }
+ *
+ * [XO:RPC] Consecutive actions:
+ *   1. nk.matchList(label="waiting_public", size=1) — only waiting rooms
+ *   2. Map live matches to response objects
+ *   3. Return rooms array (empty if none found)
+ *
+ * Server-side list so private rooms never leak to the client.
+ * Only "waiting_public" label matches with exactly 1 player are returned.
+ * hostUserId is included so the client can filter out its own rooms.
+ */
+function rpcListPublicRooms(ctx, logger, nk, payload) {
+  // [XO:RPC] rpcListPublicRooms called -- querying waiting_public matches
+  logger.info("[XO:RPC] rpcListPublicRooms user=" + ctx.userId.slice(0, 8));
+
+  var result = [];
+
+  try {
+    var matches = nk.matchList(20, true, "waiting_public", 1, 1, "*");
+
+    if (!matches || matches.length === 0) {
+      // [XO:RPC] No public waiting rooms found -- returning empty list
+      logger.info("[XO:RPC] rpcListPublicRooms -> 0 rooms");
+      return JSON.stringify({ rooms: [] });
+    }
+
+    // SECURITY: nk.matchList label is a Bleve full-text query, NOT exact match.
+    // Hard-filter so private rooms can never leak regardless of search backend.
+    var publicOnly = [];
+    for (var i = 0; i < matches.length; i++) {
+      if (matches[i].label === "waiting_public") {
+        publicOnly.push(matches[i]);
+      }
+    }
+
+    var leaked = matches.length - publicOnly.length;
+    if (leaked > 0) {
+      // [XO:WARN] Bleve token leak -- non-public match(es) stripped server-side
+      logger.warn(
+        "[XO:WARN] rpcListPublicRooms stripped " +
+          leaked +
+          " non-public match(es) that leaked through matchList label filter",
+      );
+    }
+
+    if (publicOnly.length === 0) {
+      return JSON.stringify({ rooms: [] });
+    }
+
+    // Batch-read room_index/{matchId} for each live public match to get
+    // roomCode, hostUserId, hostUsername, createdAt in one storage call.
+    var indexKeys = [];
+    for (var j = 0; j < publicOnly.length; j++) {
+      indexKeys.push({
+        collection: "room_index",
+        key: publicOnly[j].matchId,
+        userId: SYSTEM_USER_ID,
+      });
+    }
+
+    var indexMap = {};
+    try {
+      var indexRecords = nk.storageRead(indexKeys);
+      for (var k = 0; k < indexRecords.length; k++) {
+        indexMap[indexRecords[k].key] = indexRecords[k].value;
+      }
+    } catch (e2) {
+      // [XO:WARN] room_index batch read failed -- rooms will have null metadata
+      logger.warn("[XO:WARN] rpcListPublicRooms room_index read failed: " + e2);
+    }
+
+    for (var m = 0; m < publicOnly.length; m++) {
+      var match = publicOnly[m];
+      var meta = indexMap[match.matchId] || {};
+      result.push({
+        matchId: match.matchId,
+        size: match.size || 1,
+        roomCode: meta.roomCode || null,
+        hostUserId: meta.hostUserId || null,
+        hostUsername: meta.hostUsername || null,
+        createdAt: meta.createdAt || 0,
+      });
+    }
+
+    logger.info(
+      "[XO:RPC] rpcListPublicRooms -> " +
+        result.length +
+        " public room(s) (raw=" +
+        matches.length +
+        " leaked=" +
+        leaked +
+        ")",
+    );
+  } catch (e) {
+    // [XO:WARN] matchList failed in rpcListPublicRooms -- returning empty list
+    logger.warn("[XO:WARN] rpcListPublicRooms matchList failed: " + e);
+  }
+
+  return JSON.stringify({ rooms: result });
+}
+
+//  Module init
 
 var InitModule = function (ctx, logger, nk, initializer) {
+  // [XO:LB] Creating xo_alltime leaderboard — desc score, no reset, uses "set" operator
   try {
     nk.leaderboardCreate("xo_alltime", false, "desc", "set", "", {});
-    logger.info("[XO] Leaderboard xo_alltime ready");
+    logger.info("[XO:LB] xo_alltime leaderboard ready");
   } catch (e) {
-    if (String(e).indexOf("already exists") !== -1) {
-      logger.info("[XO] xo_alltime already exists, skipping create");
+    if (String(e).indexOf("already exists") === -1) {
+      // [XO:WARN] xo_alltime create failed unexpectedly (not "already exists")
+      logger.warn("[XO:WARN] xo_alltime leaderboard create failed: " + e);
     } else {
-      logger.warn("[XO] xo_alltime create failed: " + e);
+      logger.info("[XO:LB] xo_alltime already exists — skipping create");
     }
   }
 
+  // [XO:LB] Creating xo_monthly leaderboard — resets on "0 0 1 * *" (1st of month)
   try {
     nk.leaderboardCreate("xo_monthly", false, "desc", "set", "0 0 1 * *", {});
-    logger.info("[XO] Leaderboard xo_monthly ready");
+    logger.info("[XO:LB] xo_monthly leaderboard ready");
   } catch (e) {
-    if (String(e).indexOf("already exists") !== -1) {
-      logger.info("[XO] xo_monthly already exists, skipping create");
+    if (String(e).indexOf("already exists") === -1) {
+      // [XO:WARN] xo_monthly create failed unexpectedly (not "already exists")
+      logger.warn("[XO:WARN] xo_monthly leaderboard create failed: " + e);
     } else {
-      logger.warn("[XO] xo_monthly create failed: " + e);
+      logger.info("[XO:LB] xo_monthly already exists — skipping create");
     }
   }
 
+  // [XO:INIT] Registering match handler under name "xo"
   initializer.registerMatch("xo", {
     matchInit: matchInit,
     matchJoinAttempt: matchJoinAttempt,
@@ -647,6 +1269,17 @@ var InitModule = function (ctx, logger, nk, initializer) {
     matchTerminate: matchTerminate,
     matchSignal: matchSignal,
   });
+
+  // [XO:INIT] Registering matchmakerMatched hook — fires when auto-matchmaker pairs players
   initializer.registerMatchmakerMatched(matchmakerMatched);
-  logger.info("[XO] Module loaded and registered");
+
+  // [XO:RPC] Registering RPCs — createRoom, joinByCode, listPublicRooms
+  initializer.registerRpc("xo_create_room", rpcCreateRoom);
+  initializer.registerRpc("xo_join_by_code", rpcJoinByCode);
+  initializer.registerRpc("xo_list_public_rooms", rpcListPublicRooms);
+
+  // [XO:INIT] Module fully loaded — all handlers and RPCs registered
+  logger.info(
+    "[XO:INIT] Module loaded — match handler v2 (color-coded logging)",
+  );
 };

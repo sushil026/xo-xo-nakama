@@ -4,6 +4,7 @@ import LandingScreen from "./features/landing/LandingScreen";
 import HomeScreen from "./features/home/HomeScreen";
 import ModesScreen from "./features/modes/ModesScreen";
 import MatchmakingScreen from "./features/matchmaking/MatchmakingScreen";
+import RoomScreen from "./features/rooms/RoomScreen";
 import LocalGameScreen from "./features/game/LocalGame";
 import OnlineGameScreen from "./features/game/OnlineGameScreen";
 import ProfileScreen from "./features/profile/ProfileScreen";
@@ -15,6 +16,7 @@ type Screen =
   | "home"
   | "modes"
   | "matchmaking"
+  | "room"
   | "game"
   | "local-game"
   | "profile"
@@ -38,21 +40,28 @@ export default function App() {
 
   useEffect(() => {
     if (DEBUG_FORCE_OFFLINE) return;
-
     const goOnline = () => setIsOffline(false);
     const goOffline = () => setIsOffline(true);
-
     window.addEventListener("online", goOnline);
     window.addEventListener("offline", goOffline);
-
     return () => {
       window.removeEventListener("online", goOnline);
       window.removeEventListener("offline", goOffline);
     };
   }, []);
 
-  //  Landing
+  // Shared handler: once any flow (matchmaking OR room) has a match ready,
+  // stash the state and navigate to the game screen.
+  const handleMatchFound = (
+    matchId: string,
+    opponentName: string,
+    iAmX: boolean,
+  ) => {
+    setMatchState({ matchId, opponentName, iAmX });
+    setScreen("game");
+  };
 
+  //  Landing
   if (screen === "landing") {
     return (
       <LandingScreen
@@ -64,21 +73,19 @@ export default function App() {
   }
 
   //  Home
-
   if (screen === "home") {
     return (
       <HomeScreen
         isOffline={isOffline}
         onPlay={() => setScreen("modes")}
         onLocalGame={() => setScreen("local-game")}
-        onProfile={() => setScreen("profile")} // ✅ UPDATED
-        onLeaderboard={() => setScreen("leaderboard")} // ✅ UPDATED
+        onProfile={() => setScreen("profile")}
+        onLeaderboard={() => setScreen("leaderboard")}
       />
     );
   }
 
   //  Modes
-
   if (screen === "modes") {
     return (
       <ModesScreen
@@ -86,34 +93,35 @@ export default function App() {
         onBack={() => setScreen("home")}
         onMatchmaking={() => setScreen("matchmaking")}
         onLocal={() => setScreen("local-game")}
-        onAI={() => console.log("ai")}
-        onShare={() => console.log("share")}
+        onAI={() => console.log("ai — coming soon")}
+        onShare={() => setScreen("room")}
       />
     );
   }
 
-  //  Matchmaking
-
+  //  Auto matchmaking
   if (screen === "matchmaking") {
     return (
       <MatchmakingScreen
-        onMatchFound={(matchId, opponentName, iAmX) => {
-          setMatchState({ matchId, opponentName, iAmX });
-          setScreen("game");
-        }}
+        onMatchFound={handleMatchFound}
         onCancel={() => setScreen("modes")}
       />
     );
   }
 
-  //  Local Game
+  //  Room screen (Create & Share / Browse / Join by code)
+  if (screen === "room") {
+    return (
+      <RoomScreen onBack={() => setScreen("modes")} onJoin={handleMatchFound} />
+    );
+  }
 
+  //  Local game
   if (screen === "local-game") {
     return <LocalGameScreen onBack={() => setScreen("modes")} />;
   }
 
-  //  Online Game
-
+  //  Online game
   if (screen === "game" && matchState) {
     return (
       <OnlineGameScreen
@@ -128,14 +136,12 @@ export default function App() {
     );
   }
 
-  // Fallback safety
   if (screen === "game" && !matchState) {
     setScreen("modes");
     return null;
   }
 
   //  Profile
-
   if (screen === "profile") {
     return (
       <ProfileScreen
@@ -145,14 +151,12 @@ export default function App() {
     );
   }
 
-  //  Match History
-
+  //  Match history
   if (screen === "matchHistory") {
     return <MatchHistoryScreen onBack={() => setScreen("profile")} />;
   }
 
   //  Leaderboard
-
   if (screen === "leaderboard") {
     return <LeaderboardScreen onBack={() => setScreen("home")} />;
   }

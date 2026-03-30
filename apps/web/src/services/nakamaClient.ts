@@ -473,6 +473,7 @@ export const getLeaderboard = async (
 
   // Build initial entries. username may be empty for pre-fix records.
   const entries: LeaderboardEntry[] = records.map((r, i) => ({
+    owner_id: r.owner_id ?? "",
     rank: Number(r.rank ?? i + 1),
     username: r.username || "",
     userId: r.owner_id ?? "",
@@ -590,6 +591,7 @@ export const getMyLeaderboardRecord = async (
   }
 
   return {
+    owner_id: r.owner_id ?? "",
     rank: Number(r.rank ?? 0),
     username,
     userId: r.owner_id ?? "",
@@ -599,6 +601,122 @@ export const getMyLeaderboardRecord = async (
     losses,
     draws,
   };
+};
+
+//  Room types
+
+export interface RoomInfo {
+  matchId: string;
+  roomCode: string | null;
+  isPublic: boolean;
+  size: number;
+  hostUsername: string | null;
+  createdAt: number;
+}
+
+export interface CreateRoomResult {
+  matchId: string;
+  roomCode: string;
+  isPublic: boolean;
+}
+
+export type JoinByCodeResult =
+  | { ok: true; matchId: string }
+  | { ok: false; error: "not_found" | "full" | "unknown" };
+
+//  Room functions
+
+/**
+ * List open public rooms (label = "waiting_public", 1 player slot filled).
+ * Uses Nakama's native listMatches which filters by label server-side —
+ * private rooms (label "waiting_private") never appear here.
+ *
+ * Returns rooms sorted newest-first based on the label; Nakama doesn't
+ * expose createdAt natively so we use match metadata when available.
+ */
+export const listOpenRooms = async (
+  session: Session,
+  limit = 20,
+): Promise<RoomInfo[]> => {
+  const res = await client.listMatches(
+    session,
+    limit,
+    true, // authoritative only
+    "waiting_public", // label filter — exact match
+    1, // minSize: at least the host is in
+    1, // maxSize: still has a free slot (not yet 2)
+    "*",
+  );
+
+  const matches = res.matches ?? [];
+
+  return matches.map((m) => {
+    // Nakama match metadata is stored as a JSON string in m.label
+    // We keep label clean for filtering, so metadata comes from match properties
+    const meta = (m as any).metadata ?? {};
+    return {
+      matchId: m.match_id ?? "",
+      roomCode: meta.roomCode ?? "",
+      isPublic: true,
+      size: m.size ?? 1,
+      hostUsername: meta.hostUsername ?? null,
+      createdAt: meta.createdAt ?? 0,
+    } satisfies RoomInfo;
+  });
+};
+
+/**
+ * Call xo_create_room RPC.
+ * Server creates the match, generates the code, writes rooms/{code}.
+ * Returns matchId + roomCode. Client must then call socket.joinMatch(matchId).
+ */
+export const createRoom = async (
+  session: Session,
+  isPublic: boolean,
+): Promise<CreateRoomResult> => {
+  const res = await client.rpc(session, "xo_create_room", { isPublic });
+  return res.payload as CreateRoomResult;
+};
+
+/**
+ * Call xo_join_by_code RPC.
+ * Server looks up rooms/{code} under SYSTEM_USER_ID and validates the match.
+ * Returns { ok: true, matchId } or { ok: false, error }.
+ * Client must then call socket.joinMatch(matchId) on ok:true.
+ */
+export const joinByCode = async (
+  session: Session,
+  roomCode: string,
+): Promise<JoinByCodeResult> => {
+  try {
+    const res = await client.rpc(session, "xo_join_by_code", {
+      roomCode: roomCode.toUpperCase().replace(/[^A-Z0-9]/g, ""),
+    });
+    const payload = res.payload as { matchId?: string; error?: string };
+    if (payload.error) {
+      const err = payload.error as "not_found" | "full";
+      return { ok: false, error: err ?? "unknown" };
+    }
+    return { ok: true, matchId: payload.matchId! };
+  } catch {
+    return { ok: false, error: "unknown" };
+  }
+};
+
+/**
+ * Call xo_list_public_rooms RPC.
+ * Server returns only "waiting_public" matches with 1 player.
+ * Private rooms NEVER appear here because the filter happens server-side.
+ *
+ * hostUserId is included so the caller can filter out their own room:
+ *   const others = rooms.filter(r => r.hostUserId !== session.user_id);
+ */
+export const listPublicRooms = async (
+  session: Session,
+): Promise<RoomInfo[]> => {
+  const res = await client.rpc(session, "xo_list_public_rooms", {});
+  const payload = res.payload as { rooms: RoomInfo[] };
+  return payload.rooms ?? [];
 };
 
 export { client };
