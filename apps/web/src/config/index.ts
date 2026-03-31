@@ -1,18 +1,8 @@
-// const isSecure = window.location.protocol === "https:";
-
-// const config = {
-//   nakama: {
-//     host: window.location.hostname,
-//     port: isSecure ? "443" : "80",
-//     ssl: isSecure,
-//   },
-// };
-
 const config = {
   nakama: {
-    host: window.location.hostname,
-    port: "7350",
-    ssl: false,
+    host: import.meta.env.VITE_NAKAMA_HOST || window.location.hostname,
+    port: import.meta.env.VITE_NAKAMA_PORT || "7350",
+    ssl: import.meta.env.VITE_NAKAMA_SSL === "true" || false,
   },
 };
 
