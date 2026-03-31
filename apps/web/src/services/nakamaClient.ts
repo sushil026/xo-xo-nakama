@@ -710,17 +710,27 @@ export const joinByCode = async (
     const res = await client.rpc(session, "xo_join_by_code", {
       roomCode: roomCode.toUpperCase().replace(/[^A-Z0-9]/g, ""),
     });
-    const payload = res.payload as { matchId?: string; error?: string };
 
-    if (payload.error) {
+    const payload = res.payload as unknown;
+
+    if (typeof payload === "object" && payload !== null && "error" in payload) {
       const err =
         payload.error === "not_found" || payload.error === "full"
           ? payload.error
           : "unknown";
 
-      return { ok: false, error: err } as const;
+      return { ok: false, error: err };
     }
-    return { ok: true, matchId: payload.matchId! } as const;
+
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "matchId" in payload
+    ) {
+      return { ok: true, matchId: payload.matchId as string };
+    }
+
+    return { ok: false, error: "unknown" };
   } catch {
     return { ok: false, error: "unknown" };
   }
