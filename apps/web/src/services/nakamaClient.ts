@@ -713,26 +713,30 @@ export const joinByCode = async (
 
     const payload = res.payload as unknown;
 
+    // Error case
     if (typeof payload === "object" && payload !== null && "error" in payload) {
-      const err =
-        payload.error === "not_found" || payload.error === "full"
-          ? payload.error
-          : "unknown";
+      const raw = (payload as any).error;
 
-      return { ok: false, error: err };
+      const err = raw === "not_found" || raw === "full" ? raw : "unknown";
+
+      return { ok: false, error: err } as const;
     }
 
+    // Success case
     if (
       typeof payload === "object" &&
       payload !== null &&
       "matchId" in payload
     ) {
-      return { ok: true, matchId: payload.matchId as string };
+      const matchId = (payload as any).matchId;
+
+      return { ok: true, matchId: String(matchId) } as const;
     }
 
-    return { ok: false, error: "unknown" };
+    // Fallback
+    return { ok: false, error: "unknown" } as const;
   } catch {
-    return { ok: false, error: "unknown" };
+    return { ok: false, error: "unknown" } as const;
   }
 };
 
