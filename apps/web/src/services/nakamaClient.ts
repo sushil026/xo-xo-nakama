@@ -63,6 +63,7 @@ export interface StoredMatch {
   moves: number[];
   winner: string | null; // "X" | "O" | "draw"
   endReason: "win" | "draw" | "timeout" | "forfeit";
+  gameMode: "matchmaker" | "room_public" | "room_private";
   openingCell: number | null; // first move cell index (0-8), null if no moves
   createdAt: number;
 }
@@ -121,6 +122,11 @@ export const connect = async (): Promise<ConnectResult> => {
   const session = await client.authenticateDevice(deviceId, true);
   const socket = client.createSocket(config.nakama.ssl, false);
   await socket.connect(session, true);
+
+  socket.ondisconnect = () => {
+    _socket = null;
+    _session = null;
+  };
 
   _socket = socket;
   _session = session;
@@ -610,6 +616,7 @@ export interface RoomInfo {
   roomCode: string | null;
   isPublic: boolean;
   size: number;
+  hostUserId: string | null;
   hostUsername: string | null;
   createdAt: number;
 }
@@ -674,7 +681,10 @@ export const createRoom = async (
   session: Session,
   isPublic: boolean,
 ): Promise<CreateRoomResult> => {
-  const res = await client.rpc(session, "xo_create_room", { isPublic });
+  const res = await client.rpc(session, "xo_create_room", {
+    isPublic,
+    gameMode: isPublic ? "room_public" : "room_private",
+  });
   return res.payload as CreateRoomResult;
 };
 

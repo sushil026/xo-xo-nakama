@@ -203,6 +203,36 @@ export default function ModesScreen({
             </div>
           </button>
 
+          {/* Create & Share — active */}
+          <button
+            className="mode-card"
+            onClick={onShare}
+            type="button"
+            style={{ minHeight: 116, textAlign: "left", overflow: "hidden" }}
+          >
+            <div
+              className="mode-card-bar"
+              style={{
+                background: "linear-gradient(to bottom, #8B7CF6, #6b5cc4)",
+              }}
+            />
+            <span className="mode-card-coord">02 / INVITE</span>
+            <img
+              src="/public/qr-code.svg"
+              aria-hidden
+              style={cardBgStyle("58%", -6, -10)}
+            />
+            <div style={{ position: "relative", zIndex: 1 }}>
+              <CardGlyph color="#8B7CF6">▸ Invite</CardGlyph>
+              <div className="t-head" style={{ fontSize: 26 }}>
+                Create &amp; Share
+              </div>
+              <p className="t-body" style={{ marginTop: 6 }}>
+                Generate a code · Send a link · Play anywhere
+              </p>
+            </div>
+          </button>
+
           {/* LOCAL DUEL — always active */}
           <button
             className="mode-card"
@@ -217,7 +247,7 @@ export default function ModesScreen({
                   "linear-gradient(to bottom, var(--amber), var(--amber-dim))",
               }}
             />
-            <span className="mode-card-coord">02 / LOCAL</span>
+            <span className="mode-card-coord">03 / LOCAL</span>
             <img
               src="/public/spartan.svg"
               aria-hidden
@@ -230,36 +260,6 @@ export default function ModesScreen({
               </div>
               <p className="t-body" style={{ marginTop: 6 }}>
                 Pass &amp; play · Same screen · Face to face
-              </p>
-            </div>
-          </button>
-
-          {/* Create & Share — active */}
-          <button
-            className="mode-card"
-            onClick={onShare}
-            type="button"
-            style={{ minHeight: 116, textAlign: "left", overflow: "hidden" }}
-          >
-            <div
-              className="mode-card-bar"
-              style={{
-                background: "linear-gradient(to bottom, #8B7CF6, #6b5cc4)",
-              }}
-            />
-            <span className="mode-card-coord">03 / INVITE</span>
-            <img
-              src="/public/qr-code.svg"
-              aria-hidden
-              style={cardBgStyle("58%", -6, -10)}
-            />
-            <div style={{ position: "relative", zIndex: 1 }}>
-              <CardGlyph color="#8B7CF6">▸ Invite</CardGlyph>
-              <div className="t-head" style={{ fontSize: 26 }}>
-                Create &amp; Share
-              </div>
-              <p className="t-body" style={{ marginTop: 6 }}>
-                Generate a code · Send a link · Play anywhere
               </p>
             </div>
           </button>

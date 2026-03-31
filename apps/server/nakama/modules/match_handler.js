@@ -293,6 +293,7 @@ function saveMatchResult(ctx, nk, logger, state, endReason) {
         key: state.matchId,
         value: {
           matchId: state.matchId,
+          gameMode: state.gameMode,
           players: state.players.map(function (p) {
             return {
               userId: p.userId,
@@ -508,6 +509,12 @@ function matchInit(ctx, logger, nk, params) {
     state: {
       board: Array(9).fill(null),
       players: [],
+      phase: "waiting",
+      knockerName: null,
+      expiresAt: Date.now() + 900000, // 15 min
+      gameMode: params?.gameMode || "matchmaker",
+      hostUserId: hostUserId,
+      joinerPresence: null,
       turn: null,
       winner: null,
       moves: [],
@@ -532,7 +539,16 @@ function matchJoinAttempt(
   presence,
   metadata,
 ) {
-  // [XO:JOIN] Rejoin check — existing player re-connecting, always accepted
+  logger.info(
+    "[XO:JOIN] matchJoinAttempt phase=" +
+      state.phase +
+      " players=" +
+      state.players.length +
+      " user=" +
+      presence.userId.slice(0, 8),
+  );
+
+  // 1. Rejoin — always allow
   for (var i = 0; i < state.players.length; i++) {
     if (state.players[i].userId === presence.userId) {
       logger.info(
@@ -545,7 +561,24 @@ function matchJoinAttempt(
     }
   }
 
-  // [XO:JOIN] Match full — rejecting third joiner
+  // 2. Block join if room is not in waiting phase
+  if (state.phase && state.phase !== "waiting") {
+    logger.info(
+      "[XO:JOIN] Rejected (phase=" +
+        state.phase +
+        ") user=" +
+        presence.userId.slice(0, 8) +
+        " matchId=" +
+        ctx.matchId.slice(0, 8),
+    );
+    return {
+      state: state,
+      accept: false,
+      rejectMessage: "Room not accepting players",
+    };
+  }
+
+  // 3. Block if already 2 players
   if (state.players.length >= 2) {
     logger.info(
       "[XO:JOIN] Rejected (full) user=" +
@@ -553,22 +586,48 @@ function matchJoinAttempt(
         " matchId=" +
         ctx.matchId.slice(0, 8),
     );
-    return { state: state, accept: false, rejectMessage: "Match is full" };
+    return {
+      state: state,
+      accept: false,
+      rejectMessage: "Match is full",
+    };
   }
 
-  // [XO:JOIN] New player accepted — slot available
+  // 4. Allow joiner presence (BUT do NOT start game)
+  if (state.players.length === 1) {
+    logger.info(
+      "[XO:JOIN] Joiner accepted (awaiting knock) user=" +
+        presence.userId.slice(0, 8) +
+        " matchId=" +
+        ctx.matchId.slice(0, 8),
+    );
+
+    // IMPORTANT:
+    // - we accept presence
+    // - but game will NOT start here
+    // - client must send OP_KNOCK next
+
+    return { state: state, accept: true };
+  }
+
+  // 5. First player (host)
   logger.info(
-    "[XO:JOIN] Accepted new player user=" +
+    "[XO:JOIN] Host joined user=" +
       presence.userId.slice(0, 8) +
       " matchId=" +
-      ctx.matchId.slice(0, 8) +
-      " currentPlayers=" +
-      state.players.length,
+      ctx.matchId.slice(0, 8),
   );
+
   return { state: state, accept: true };
 }
 
 function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
+  logger.info(
+    "[XO:JOIN] matchJoin called presences=" +
+      presences.length +
+      " current_players=" +
+      state.players,
+  );
   for (var i = 0; i < presences.length; i++) {
     var p = presences[i];
     var alreadyIn = false;
@@ -584,6 +643,23 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
         symbol: state.players.length === 0 ? "X" : "O",
         username: p.username,
       });
+      if (state.players.length === 2) {
+        if (state.roomCode) {
+          // room match — wait for knock
+          state.joinerPresence = p;
+          logger.info("[XO:JOIN] Joiner present — waiting for knock");
+          broadcast(nk, dispatcher, state);
+        } else {
+          // matchmaker match — start immediately
+          state.phase = "active";
+          state.turn = state.players[0].userId;
+          state.turnStartTime = Date.now();
+          state.label = "active";
+          dispatcher.matchLabelUpdate("active");
+          logger.info("[XO:JOIN] Matchmaker game starting immediately");
+          broadcast(nk, dispatcher, state);
+        }
+      }
       var assignedSymbol = state.players[state.players.length - 1].symbol;
       // [XO:JOIN] Player added to roster — symbol assigned, slot count updated
       logger.info(
@@ -600,35 +676,6 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
           "/2",
       );
     }
-  }
-
-  if (state.players.length === 2) {
-    if (!state.turn) {
-      state.turn = state.players[0].userId;
-      state.turnStartTime = Date.now();
-      // [XO:JOIN] Both players present — first turn assigned to X player
-      logger.info(
-        "[XO:JOIN] First turn assigned to " +
-          state.players[0].username +
-          " (X) matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
-    }
-    if (state.label !== "tic-tac-toe" && state.label !== "active") {
-      state.label = "active";
-      dispatcher.matchLabelUpdate("active");
-      // [XO:INIT] Label promoted to active — match removed from public room browser
-      logger.info(
-        "[XO:INIT] Label → active matchId=" +
-          ctx.matchId.slice(0, 8) +
-          " (was " +
-          (state.roomCode ? "room" : "matchmaker") +
-          ")",
-      );
-      // [XO:ROOM] Second player in — deleting room code, no longer needed
-      deleteRoomRecord(nk, logger, state.roomCode, ctx.matchId);
-    }
-    broadcast(nk, dispatcher, state);
   }
 
   return { state: state };
@@ -652,14 +699,31 @@ function matchLeave(ctx, logger, nk, dispatcher, tick, state, presences) {
 function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
   if (state.winner !== null) return { state: state };
 
-  //  Turn timeout check
-  if (state.turn && Date.now() - state.turnStartTime > 30000) {
+  // EXPIRY CHECK
+  if (
+    state.players.length > 0 &&
+    Date.now() > state.expiresAt &&
+    state.phase !== "active"
+  ) {
+    state.phase = "expired";
+
+    logger.info("[XO:END] Room expired matchId=" + ctx.matchId.slice(0, 8));
+
+    broadcast(nk, dispatcher, state);
+    return null;
+  }
+
+  // TURN TIMEOUT (ONLY DURING ACTIVE GAME)
+  if (
+    state.phase === "active" &&
+    state.turn &&
+    Date.now() - state.turnStartTime > 30000
+  ) {
     for (var i = 0; i < state.players.length; i++) {
       if (state.players[i].userId !== state.turn) {
         state.winner = state.players[i].symbol;
         state.turnStartTime = 0;
 
-        // [XO:END] Timeout expired (>30 s) — opponent awarded the win
         logger.info(
           "[XO:END] Timeout: " +
             state.turn.slice(0, 8) +
@@ -672,9 +736,9 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
         try {
           saveMatchResult(ctx, nk, logger, state, "timeout");
         } catch (e) {
-          // [XO:WARN] saveMatchResult threw after timeout — result may not be persisted
           logger.warn("[XO:WARN] saveMatchResult failed after timeout: " + e);
         }
+
         broadcast(nk, dispatcher, state);
         break;
       }
@@ -682,14 +746,14 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     return { state: state };
   }
 
-  //  Process messages
+  // PROCESS MESSAGES
   for (var i = 0; i < messages.length; i++) {
     var msg = messages[i];
     var data;
+
     try {
       data = JSON.parse(nk.binaryToString(msg.data));
     } catch (_) {
-      // [XO:WARN] Malformed message received — non-JSON payload, skipping
       logger.warn(
         "[XO:WARN] Bad message payload from user=" +
           msg.sender.userId.slice(0, 8) +
@@ -699,20 +763,111 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       continue;
     }
 
-    //  Resync request
-    if (typeof data.index === "undefined" && !data.forfeit) {
-      // [XO:JOIN] Client requested resync — broadcasting current state back to sender
+    // KNOCK FLOW
+
+    // OP_KNOCK (2)
+    if (msg.opCode === 2) {
+      if (state.phase !== "waiting") continue;
+
+      var knockerName =
+        data.knockerName ||
+        msg.sender.username ||
+        msg.sender.userId.slice(0, 8);
+
+      state.phase = "knocking";
+      state.knockerName = knockerName;
+
       logger.info(
-        "[XO:JOIN] Resync sent to user=" +
-          msg.sender.userId.slice(0, 8) +
+        "[XO:KNOCK] Knock from " +
+          knockerName +
           " matchId=" +
           ctx.matchId.slice(0, 8),
       );
+      logger.info(
+        "[XO:KNOCK] players[0].userId=" +
+          state.players[0].userId +
+          " hostUserId=" +
+          state.hostUserId,
+      );
+
+      broadcast(nk, dispatcher, state);
+      continue;
+    }
+
+    // OP_HOST_RESPONSE (3)
+    if (msg.opCode === 3) {
+      if (state.phase !== "knocking") continue;
+
+      if (data.accept === true) {
+        // ACCEPT
+        state.phase = "active";
+        state.knockerName = null;
+
+        state.turn = state.players[0].userId;
+        state.turnStartTime = Date.now();
+
+        if (state.label !== "active") {
+          state.label = "active";
+          dispatcher.matchLabelUpdate("active");
+          deleteRoomRecord(nk, logger, state.roomCode, ctx.matchId);
+        }
+
+        logger.info("[XO:KNOCK] Accepted → game starting");
+
+        broadcast(nk, dispatcher, state);
+        continue;
+      } else {
+        // DECLINE
+        state.phase = "declined";
+        state.knockerName = null;
+
+        logger.info(
+          "[XO:KNOCK] decline state.joinerPresence=" +
+            JSON.stringify(state.joinerPresence),
+        );
+        logger.info("[XO:KNOCK] Declined");
+
+        broadcast(nk, dispatcher, state);
+
+        logger.info(
+          "[XO:KNOCK] Decline broadcast complete: " +
+            state.joinerPresence +
+            " hostUserId=" +
+            state.hostUserId,
+        );
+
+        state.joinerPresence = null;
+
+        // RESET
+        state.phase = "waiting";
+        state.players = state.players.slice(0, 1);
+
+        continue;
+      }
+    }
+
+    // OP_CLOSE_ROOM (4)
+    if (msg.opCode === 4) {
+      state.phase = "expired";
+
+      logger.info("[XO:ROOM] Closed by host");
+
+      broadcast(nk, dispatcher, state);
+      return null;
+    }
+
+    // EXISTING GAME LOGIC
+
+    // Ignore gameplay if not active
+    if (state.phase !== "active") continue;
+
+    // Resync
+    if (typeof data.index === "undefined" && !data.forfeit) {
       broadcast(nk, dispatcher, state, [msg.sender]);
       continue;
     }
 
-    //  Forfeit
+    // Forfeit
     if (data.forfeit === true) {
       if (state.winner) continue;
 
@@ -728,28 +883,26 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       state.winner = wp.symbol;
       state.turnStartTime = 0;
 
-      // [XO:END] Forfeit received — forfeiting player concedes, opponent wins
       logger.info(
         "[XO:END] Forfeit by user=" +
           msg.sender.userId.slice(0, 8) +
           " → winner=" +
-          state.winner +
-          " matchId=" +
-          ctx.matchId.slice(0, 8),
+          state.winner,
       );
 
       try {
         saveMatchResult(ctx, nk, logger, state, "forfeit");
       } catch (e) {
-        // [XO:WARN] saveMatchResult threw after forfeit — result may not be persisted
         logger.warn("[XO:WARN] saveMatchResult failed after forfeit: " + e);
       }
+
       broadcast(nk, dispatcher, state);
       continue;
     }
 
-    //  Move
+    // Move
     if (state.winner || msg.sender.userId !== state.turn) continue;
+
     var idx = data.index;
 
     if (
@@ -757,31 +910,10 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
       idx < 0 ||
       idx > 8 ||
       idx !== Math.floor(idx)
-    ) {
-      // [XO:WARN] Invalid move index — out of range or non-integer, ignoring
-      logger.warn(
-        "[XO:WARN] Invalid index=" +
-          idx +
-          " from user=" +
-          msg.sender.userId.slice(0, 8) +
-          " matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
+    )
       continue;
-    }
 
-    if (state.board[idx] !== null) {
-      // [XO:WARN] Move on occupied cell — client sent duplicate or stale move
-      logger.warn(
-        "[XO:WARN] Cell already occupied idx=" +
-          idx +
-          " by user=" +
-          msg.sender.userId.slice(0, 8) +
-          " matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
-      continue;
-    }
+    if (state.board[idx] !== null) continue;
 
     var cp = null;
     for (var k = 0; k < state.players.length; k++) {
@@ -795,43 +927,12 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     state.board[idx] = cp.symbol;
     state.moves.push(idx);
 
-    // [XO:MOVE] Move applied — cell marked, checking for win or draw
-    logger.info(
-      "[XO:MOVE] " +
-        cp.username +
-        " (user=" +
-        cp.userId.slice(0, 8) +
-        ") placed " +
-        cp.symbol +
-        " at idx=" +
-        idx +
-        " moveNo=" +
-        state.moves.length +
-        " matchId=" +
-        ctx.matchId.slice(0, 8),
-    );
-
     var winner = checkWinner(state.board);
+
     if (winner) {
       state.winner = winner;
       state.turnStartTime = 0;
-
-      // [XO:END] Win condition met — winning line found, match over
-      logger.info(
-        "[XO:END] Winner=" +
-          winner +
-          " after " +
-          state.moves.length +
-          " move(s) matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
-
-      try {
-        saveMatchResult(ctx, nk, logger, state, "win");
-      } catch (e) {
-        // [XO:WARN] saveMatchResult threw after win — result may not be persisted
-        logger.warn("[XO:WARN] saveMatchResult failed after win: " + e);
-      }
+      saveMatchResult(ctx, nk, logger, state, "win");
     } else if (
       state.board.every(function (c) {
         return c !== null;
@@ -839,23 +940,8 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
     ) {
       state.winner = "draw";
       state.turnStartTime = 0;
-
-      // [XO:END] Board full, no winner — draw recorded
-      logger.info(
-        "[XO:END] Draw after " +
-          state.moves.length +
-          " move(s) matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
-
-      try {
-        saveMatchResult(ctx, nk, logger, state, "draw");
-      } catch (e) {
-        // [XO:WARN] saveMatchResult threw after draw — result may not be persisted
-        logger.warn("[XO:WARN] saveMatchResult failed after draw: " + e);
-      }
+      saveMatchResult(ctx, nk, logger, state, "draw");
     } else {
-      // [XO:MOVE] Switching turn — no terminal condition, next player's clock starts
       for (var n = 0; n < state.players.length; n++) {
         if (state.players[n].userId !== state.turn) {
           state.turn = state.players[n].userId;
@@ -863,12 +949,6 @@ function matchLoop(ctx, logger, nk, dispatcher, tick, state, messages) {
         }
       }
       state.turnStartTime = Date.now();
-      logger.info(
-        "[XO:MOVE] Turn → " +
-          state.turn.slice(0, 8) +
-          " matchId=" +
-          ctx.matchId.slice(0, 8),
-      );
     }
 
     broadcast(nk, dispatcher, state);
@@ -1147,7 +1227,7 @@ function rpcListPublicRooms(ctx, logger, nk, payload) {
   var result = [];
 
   try {
-    var matches = nk.matchList(20, true, "waiting_public", 1, 1, "*");
+    var matches = nk.matchList(20, true, "waiting_public", 1, 2, "*");
 
     if (!matches || matches.length === 0) {
       // [XO:RPC] No public waiting rooms found -- returning empty list
@@ -1279,7 +1359,5 @@ var InitModule = function (ctx, logger, nk, initializer) {
   initializer.registerRpc("xo_list_public_rooms", rpcListPublicRooms);
 
   // [XO:INIT] Module fully loaded — all handlers and RPCs registered
-  logger.info(
-    "[XO:INIT] Module loaded — match handler v2 (color-coded logging)",
-  );
+  logger.info("[XO:INIT] Module loaded — match handler v10");
 };
