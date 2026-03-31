@@ -4,22 +4,37 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 
 ---
 
+## Live Deployment
+
+| Service | URL |
+|---|---|
+| **Frontend** | https://xo-xo-nakama.ranasushil026.workers.dev/ |
+| **Nakama Backend** | https://xo-xo-nakama-production.up.railway.app |
+| **Nakama API Port** | 443 (TLS) |
+
+### Infrastructure
+
+- **Backend**: [Railway](https://railway.app) — Nakama 3.22.0 + PostgreSQL, auto-deployed from `main` branch
+- **Frontend**: [Cloudflare Pages](https://pages.cloudflare.com) — Vite/React, globally distributed via Cloudflare CDN
+
+---
+
 ## Features
 
-* Real-time online gameplay over WebSockets
-* Server-authoritative game logic (validated moves, no client trust)
-* Auto-matchmaking (2-player pairing)
-* Public/private room system with shareable room codes
-* Host knock-and-accept flow for room entry control
-* Server-side turn timer enforcement (30s per move)
-* Forfeit, timeout, draw, and standard win handling
-* Persistent profiles (rating, streaks, games played)
-* Match history with detailed move sequence and mini-board replay
-* Dual leaderboards: **All-time** and **Monthly (resets on the 1st)**
-* Profile analytics (opening heatmap, activity heatmap, rating progression)
-* Reconnect-safe state resync
-* Local pass-and-play mode
-* Mobile-friendly, tactical UI style
+- Real-time online gameplay over WebSockets
+- Server-authoritative game logic (validated moves, no client trust)
+- Auto-matchmaking (2-player pairing)
+- Public/private room system with shareable room codes
+- Host knock-and-accept flow for room entry control
+- Server-side turn timer enforcement (30s per move)
+- Forfeit, timeout, draw, and standard win handling
+- Persistent profiles (rating, streaks, games played)
+- Match history with detailed move sequence and mini-board replay
+- Dual leaderboards: **All-time** and **Monthly (resets on the 1st)**
+- Profile analytics (opening heatmap, activity heatmap, rating progression)
+- Reconnect-safe state resync
+- Local pass-and-play mode
+- Mobile-friendly, tactical UI style
 
 ---
 
@@ -30,8 +45,11 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 ├── apps
 │   ├── server
 │   │   └── nakama
+│   │       ├── Dockerfile
+│   │       ├── railway.toml
 │   │       └── modules
-│   │           └── match_handler.js
+│   │           └── matches
+│   │               └── xoxo.js
 │   └── web
 │       ├── public
 │       ├── src
@@ -64,11 +82,109 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 
 ```
 React Client
-   ↓ WebSocket + RPC
-Nakama Server (Authoritative Match Handler)
+   ↓ WebSocket + RPC (wss://xo-xo-nakama-production.up.railway.app:443)
+Nakama Server (Authoritative Match Handler) — Railway
+   ↓
+PostgreSQL — Railway (internal network)
    ↓
 Storage (profiles, matches, rooms, history, analytics)
 ```
+
+---
+
+## Setup & Installation
+
+### Prerequisites
+
+- Node.js 18+
+- Docker / Docker Compose
+
+### Local Development
+
+**1. Start Backend (Postgres + Nakama)**
+
+```bash
+cd infra/docker
+docker-compose up
+```
+
+**2. Run Frontend**
+
+```bash
+cd apps/web
+npm install
+npm run dev
+```
+
+The frontend config auto-detects environment — no changes needed for local development:
+
+```ts
+// apps/web/src/config/index.ts
+const config = {
+  nakama: {
+    host: import.meta.env.VITE_NAKAMA_HOST || window.location.hostname,
+    port: import.meta.env.VITE_NAKAMA_PORT || "7350",
+    ssl: import.meta.env.VITE_NAKAMA_SSL === "true" || false,
+  },
+};
+```
+
+Locally it falls back to `window.location.hostname:7350` with no SSL. No `.env` file or code changes required.
+
+---
+
+## Deployment
+
+### Backend — Railway
+
+The Nakama service is deployed on Railway with PostgreSQL as an internal dependency.
+
+**`apps/server/nakama/Dockerfile`**
+
+```dockerfile
+FROM heroiclabs/nakama:3.22.0
+COPY modules/ /nakama/data/modules/
+```
+
+**`apps/server/nakama/railway.toml`**
+
+```toml
+[deploy]
+startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address $DATABASE_URL; do sleep 2; done && exec /nakama/nakama --name nakama1 --database.address $DATABASE_URL --logger.level INFO --console.username admin --console.password $CONSOLE_PASSWORD --runtime.js_entrypoint matches/xoxo.js'"
+```
+
+**Environment variables set in Railway:**
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Set automatically by Railway PostgreSQL plugin |
+| `CONSOLE_PASSWORD` | Set in Railway service variables |
+
+**Port exposure:** Nakama API is exposed on port `7350`, mapped to `443` via Railway's generated domain.
+
+**Redeploy:** Push to `main` — Railway auto-deploys on every commit.
+
+---
+
+### Frontend — Cloudflare Pages
+
+**Build settings:**
+
+| Setting | Value |
+|---|---|
+| Root directory | `apps/web` |
+| Build command | `npm run build` |
+| Output directory | `dist` |
+
+**Environment variables set in Cloudflare Pages:**
+
+| Variable | Value |
+|---|---|
+| `VITE_NAKAMA_HOST` | `xo-xo-nakama-production.up.railway.app` |
+| `VITE_NAKAMA_PORT` | `443` |
+| `VITE_NAKAMA_SSL` | `true` |
+
+**Redeploy:** Push to `main` — Cloudflare Pages auto-deploys on every commit.
 
 ---
 
@@ -76,92 +192,41 @@ Storage (profiles, matches, rooms, history, analytics)
 
 ### 1. Server-Authoritative Gameplay
 
-* All match logic runs on Nakama (`match_handler.js`)
-* Client sends minimal intents:
+All match logic runs on Nakama (`matches/xoxo.js`). The client sends minimal intents:
 
-  ```json
-  { "index": number }
-  ```
+```json
+{ "index": number }
+```
 
-  or control actions (knock/accept/decline/close)
-* Server validates:
-
-  * Turn ownership
-  * Cell availability
-  * Payload shape and legality
-  * End-state transitions
-
-This guarantees:
-
-* Strong anti-cheat baseline
-* Single source of truth for all clients
-* Predictable outcomes across reconnects
-
----
+or control actions (knock / accept / decline / close). The server validates turn ownership, cell availability, payload shape, and end-state transitions. This guarantees a strong anti-cheat baseline, a single source of truth across reconnects, and predictable outcomes.
 
 ### 2. Match Modes and Lifecycle
 
 Two authoritative entry paths:
 
-1. **Matchmaker flow**
+**Matchmaker flow** — client enters queue, Nakama pairs 2 players, match starts immediately when both join.
 
-   * Client enters queue
-   * Nakama pairs 2 players
-   * Match starts immediately when both join
+**Room flow** — host creates public/private room, joiner browses or enters room code, joiner sends knock, host accepts/declines, accepted knock starts game.
 
-2. **Room flow**
-
-   * Host creates public/private room
-   * Joiner browses or enters room code
-   * Joiner sends knock
-   * Host accepts/declines
-   * Accepted knock starts game
-
-Lifecycle ownership remains server-side for:
-
-* Board state
-* Turn switching
-* Timer and timeout resolution
-* Winner/draw decision
-* Persistent storage writes
-
----
+Lifecycle ownership remains server-side for board state, turn switching, timer and timeout resolution, winner/draw decision, and persistent storage writes.
 
 ### 3. Timer System (Server-Side)
 
-* Turn duration: **30 seconds**
-* Server tracks `state.turnStartTime`
-* On timeout:
+Turn duration is 30 seconds. The server tracks `state.turnStartTime`. On timeout the active player loses, the opponent is declared winner, and the result is persisted with end reason `"timeout"`. The client only renders the countdown — it does not enforce timeout outcomes.
 
-  * Active player loses by timeout
-  * Opponent is declared winner
-  * Result is persisted with end reason
+### 4. Rating Model
 
-Client only renders countdown; it does not enforce timeout outcomes.
-
----
-
-### 4. Rating Model and Competitive Gate
-
-* Starting rating: **800**
-* Provisional phase: first **3 games**
-
-  * Win: +30
-  * Loss: -15
-  * Draw: +/-0
-* Stable phase (post-provisional):
-
-  * Win: +10
-  * Loss: -5
-  * Draw: +/-0
-* Rating floor: 0
-* Leaderboard eligibility threshold: 3+ games played
+- Starting rating: **800**
+- Provisional phase (first 3 games): Win +30 / Loss −15 / Draw ±0
+- Stable phase: Win +10 / Loss −5 / Draw ±0
+- Rating floor: 0
+- Leaderboard eligibility: 3+ games played
 
 ---
 
-### 5. Data Storage
+## Data Storage
 
-#### Profile (`profile` / `data`)
+#### Profile (`profile/data`)
 
 ```json
 {
@@ -176,7 +241,7 @@ Client only renders countdown; it does not enforce timeout outcomes.
 }
 ```
 
-#### Match Record (`matches` / `{matchId}`)
+#### Match Record (`matches/{matchId}`)
 
 ```json
 {
@@ -191,96 +256,10 @@ Client only renders countdown; it does not enforce timeout outcomes.
 }
 ```
 
-#### User Match History (`user_matches` / `list`)
-
-```json
-{
-  "matches": ["latestMatchId", "olderMatchId"]
-}
-```
-
 #### Room Mapping
 
-* `rooms/{roomCode}` → forward lookup (`roomCode -> matchId`)
-* `room_index/{matchId}` → reverse metadata for public room listing
-
-#### Client Analytics (`analytics` / `data`)
-
-```json
-{
-  "openingStats": [[0, 0, 0], "...9 cells total"],
-  "cellHeatmap": [[0, 0, 0], "...9 cells total"],
-  "totalMoves": 0,
-  "avgMovesPerGame": 0,
-  "timeoutLosses": 0,
-  "forfeitLosses": 0,
-  "gamesPlayed": 0
-}
-```
-
----
-
-## Frontend Structure
-
-### Screens
-
-* `LandingScreen` — device init and username setup
-* `HomeScreen` — quick stats and navigation hub
-* `ModesScreen` — game mode entry
-* `MatchmakingScreen` — queue and auto-pair flow
-* `RoomScreen` — create/browse/join-by-code room system
-* `OnlineGameScreen` — authoritative multiplayer board
-* `ProfileScreen` — profile, analytics, rating progression
-* `MatchHistoryScreen` — detailed recent match history
-* `LeaderboardScreen` — monthly/all-time rankings
-
-### Core Modules
-
-#### `useGame.ts`
-
-* Socket lifecycle
-* Match join/create logic
-* Sending moves and handling server state
-* Reconnect and resync behavior
-
-#### `nakamaClient.ts`
-
-* Device authentication + session bootstrap
-* Shared socket reuse
-* Profile/history/leaderboard/room service functions
-* RPC wrappers for room creation, join-by-code, and public-room listing
-
----
-
-## Server (Nakama)
-
-### Match Handler (`match_handler.js`)
-
-Responsible for:
-
-* Match init and labels (`waiting_public`, `waiting_private`, `active`)
-* Join/rejoin enforcement
-* Knock flow + host response flow
-* Move validation and turn switching
-* Timeout / forfeit / draw / win finalization
-* Match persistence and profile/rating updates
-* Room record lifecycle (create/delete)
-* Leaderboard record updates
-
-### Registered RPCs
-
-* `xo_create_room` — create public/private room and return `matchId + roomCode`
-* `xo_join_by_code` — resolve code to live match with capacity checks
-* `xo_list_public_rooms` — return only waiting public rooms (server-filtered)
-
-### Matchmaker
-
-```ts
-socket.addMatchmaker("*", 2, 2);
-```
-
-* Automatically pairs exactly 2 players
-* Creates authoritative match via `matchmakerMatched`
+- `rooms/{roomCode}` — forward lookup (roomCode → matchId)
+- `room_index/{matchId}` — reverse metadata for public room listing
 
 ---
 
@@ -288,20 +267,20 @@ socket.addMatchmaker("*", 2, 2);
 
 ### Client → Server (match state opCodes)
 
-* `1` — standard gameplay payload (`{ index }` / resync / forfeit)
-* `2` — knock request
-* `3` — host accept/decline knock
-* `4` — host close room
+| OpCode | Purpose |
+|---|---|
+| `1` | Gameplay payload (`{ index }`) / resync / forfeit |
+| `2` | Knock request |
+| `3` | Host accept/decline knock |
+| `4` | Host close room |
 
 ### Client → Server (RPC)
 
-* `xo_create_room`
-* `xo_join_by_code`
-* `xo_list_public_rooms`
+- `xo_create_room` — create public/private room, returns `matchId + roomCode`
+- `xo_join_by_code` — resolve code to live match with capacity checks
+- `xo_list_public_rooms` — return only waiting public rooms (server-filtered)
 
-### Server → Client
-
-State broadcast includes (shape abbreviated):
+### Server → Client broadcast shape
 
 ```json
 {
@@ -316,74 +295,35 @@ State broadcast includes (shape abbreviated):
 
 ---
 
-## Setup & Installation
-
-### Prerequisites
-
-* Node.js
-* Docker / Docker Compose
-
-### Start Backend (Postgres + Nakama)
-
-```bash
-cd infra/docker
-docker-compose up
-```
-
-### Run Frontend
-
-```bash
-cd apps/web
-npm install
-npm run dev
-```
-
-### Local Configuration
-
-Current web config points to host machine on port `7350`:
-
-```ts
-const config = {
-  nakama: {
-    host: window.location.hostname,
-    port: "7350",
-    ssl: false
-  }
-};
-```
-
----
-
 ## Testing Multiplayer
 
-### Same Machine
+### Against the Live Deployment
 
-* Open one normal browser window and one incognito window
-* Test both:
+Open [https://xo-xo-nakama.ranasushil026.workers.dev/](https://xo-xo-nakama.ranasushil026.workers.dev/) in two browser windows (one normal, one incognito) and test both flows.
 
-  * Matchmaker flow (quick online match)
-  * Room flow (create room, join by code, knock acceptance)
+### Local
 
-### Expected Behavior
+```bash
+# Terminal 1
+cd infra/docker && docker-compose up
 
-* Matchmaker pairs two players
-* Room browser shows only waiting public rooms
-* Private rooms are joinable by code only
-* Knock/accept/decline behaves consistently
-* Moves sync in real-time
-* Turn restriction is enforced server-side
-* Timeout produces authoritative winner
-* Match result is persisted and appears in history/profile
-* Leaderboards update after eligibility threshold
+# Terminal 2
+cd apps/web && npm run dev
+```
 
----
+Open `http://localhost:5173` in two browser windows.
 
-## Design Approach
+### Expected Behaviour
 
-* Minimal tactical UI with strong information hierarchy
-* Emphasis on quick state readability and low visual noise
-* Separation of concerns across UI, transport, and authoritative game logic
-* Operational observability through structured server log prefixes
+- Matchmaker pairs two players automatically
+- Room browser shows only waiting public rooms
+- Private rooms are joinable by code only
+- Knock / accept / decline behaves consistently
+- Moves sync in real-time
+- Turn restriction is enforced server-side
+- Timeout produces an authoritative winner
+- Match result is persisted and appears in history and profile
+- Leaderboards update after the eligibility threshold (3 games)
 
 ---
 
@@ -391,9 +331,9 @@ const config = {
 
 This project was developed with AI-assisted tooling:
 
-* Cursor — implementation and refactoring workflows
-* ChatGPT — architecture, debugging, and systems reasoning
-* Claude — flow structuring and iteration support
+- **Cursor** — implementation and refactoring workflows
+- **ChatGPT** — architecture, debugging, and systems reasoning
+- **Claude** — flow structuring and iteration support
 
 AI was used as an accelerator while keeping implementation decisions and validation under manual engineering control.
 
@@ -401,11 +341,11 @@ AI was used as an accelerator while keeping implementation decisions and validat
 
 ## Upcoming
 
-* AI opponent (adaptive, non-deterministic behavior)
-* Friend system / direct challenges
-* Custom room policies (timeouts, rematch toggles, variants)
-* Deeper analytics dashboards (openings, conversion, trend overlays)
-* Improved host-room persistence when leaving room screen
+- AI opponent (adaptive, non-deterministic behaviour)
+- Friend system / direct challenges
+- Custom room policies (timeouts, rematch toggles, variants)
+- Deeper analytics dashboards (openings, conversion, trend overlays)
+- Improved host-room persistence when leaving room screen
 
 ---
 
@@ -413,10 +353,8 @@ AI was used as an accelerator while keeping implementation decisions and validat
 
 This project demonstrates:
 
-* Real-time multiplayer systems design
-* Server-authoritative game architecture
-* Production-style match and room lifecycle handling
-* Persisted competitive progression (rating + leaderboard)
-* Structured, scalable frontend feature architecture
-
----
+- Real-time multiplayer systems design
+- Server-authoritative game architecture
+- Production-style match and room lifecycle handling
+- Persisted competitive progression (rating + leaderboard)
+- Structured, scalable frontend feature architecture
