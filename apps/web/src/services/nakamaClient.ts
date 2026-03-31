@@ -464,8 +464,14 @@ export const submitLeaderboardScore = async (
   rating: number,
 ): Promise<void> => {
   await Promise.all([
-    client.writeLeaderboardRecord(session, "xo_alltime", wins, rating),
-    client.writeLeaderboardRecord(session, "xo_monthly", wins, rating),
+    client.writeLeaderboardRecord(session, "xo_alltime", {
+      score: String(rating),
+      subscore: String(wins),
+    }),
+    client.writeLeaderboardRecord(session, "xo_monthly", {
+      score: String(rating),
+      subscore: String(wins),
+    }),
   ]);
 };
 
