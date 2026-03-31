@@ -184,7 +184,7 @@ export default function ModesScreen({
             <div className="mode-card-bar" />
             <span className="mode-card-coord">01 / LIVE</span>
             <img
-              src="/public/radar.svg"
+              src="/radar.svg"
               aria-hidden
               style={cardBgStyle("78%", -10, -10)}
             />
@@ -218,7 +218,7 @@ export default function ModesScreen({
             />
             <span className="mode-card-coord">02 / INVITE</span>
             <img
-              src="/public/qr-code.svg"
+              src="/qr-code.svg"
               aria-hidden
               style={cardBgStyle("58%", -6, -10)}
             />
@@ -249,7 +249,7 @@ export default function ModesScreen({
             />
             <span className="mode-card-coord">03 / LOCAL</span>
             <img
-              src="/public/spartan.svg"
+              src="/spartan.svg"
               aria-hidden
               style={cardBgStyle("72%", -6, -10)}
             />
@@ -310,7 +310,7 @@ export default function ModesScreen({
             />
             <span className="mode-card-coord">04 / AI</span>
             <img
-              src="/public/ai-ckt.svg"
+              src="/ai-ckt.svg"
               aria-hidden
               style={cardBgStyle("62%", -8, -10)}
             />

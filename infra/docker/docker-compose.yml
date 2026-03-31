@@ -29,7 +29,7 @@ services:
           --logger.level DEBUG \
           --console.username admin \
           --console.password password \
-          --runtime.js_entrypoint "match_handler.js"
+          --runtime.js_entrypoint matches/xoxo.js
     ports:
       - "7350:7350"
       - "7351:7351"

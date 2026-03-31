@@ -73,6 +73,7 @@ interface DerivedState {
   waiting: boolean; // < 2 players joined
   endReason: EndReason | null;
   timeoutDetected: boolean;
+  oppName: string;
 }
 
 //  Pure helpers
@@ -111,7 +112,8 @@ function deriveState(
   const mySymbol: Player | null = myEntry?.symbol ?? null;
   const oppSymbol: Player | null =
     oppEntry?.symbol ?? (mySymbol ? opposite(mySymbol) : null);
-
+  const oppName =
+    oppEntry?.username || oppEntry?.userId?.slice(0, 6) || "Opponent";
   const isMyTurn = !!myId && ss.turn === myId && !ss.winner;
 
   // Move attribution: X always moves on even indices (0,2,4…), O on odd
@@ -175,6 +177,7 @@ function deriveState(
     waiting,
     endReason,
     timeoutDetected,
+    oppName,
   };
 }
 
@@ -251,6 +254,7 @@ export default function OnlineGameScreen({
     cells: Array(9).fill(null),
     mySymbol: iAmX ? "X" : "O", // prop hint; overwritten on first server msg
     oppSymbol: iAmX ? "O" : "X",
+    oppName: opponentName,
     isMyTurn: false,
     result: null,
     iWon: false,
@@ -593,7 +597,7 @@ export default function OnlineGameScreen({
         <>
           <TurnStrip
             isMyTurn={isMyTurn}
-            opponentName={opponentName}
+            opponentName={derived.oppName}
             timeLeft={timeLeft}
             timerLow={timerLow}
             activeColor={activeColor}
@@ -672,7 +676,7 @@ export default function OnlineGameScreen({
             iWon={iWon}
             isDraw={isDraw}
             mySymbol={mySymbol ?? (iAmX ? "X" : "O")}
-            oppLabel={opponentName}
+            oppLabel={derived.oppName}
             forfeitMsg={forfeitMsg}
             timeoutMsg={timeoutMsg}
             board={cells}
@@ -684,7 +688,7 @@ export default function OnlineGameScreen({
 
       {/* Opponent row */}
       <PlayerRow
-        label={opponentName}
+        label={derived.oppName}
         symbol={oppSymbol ?? (iAmX ? "O" : "X")}
         isMe={false}
         active={!result && !isMyTurn && !waiting}

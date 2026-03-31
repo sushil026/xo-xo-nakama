@@ -78,7 +78,9 @@ export default function RatingGraph({
     rating: number;
     outcome?: RatingPoint["outcome"];
   }[] = [{ game: 0, rating: startRating }];
-  points.forEach((p) =>
+  const visiblePoints = compressPoints(points);
+
+  visiblePoints.forEach((p) =>
     series.push({ game: p.game, rating: p.rating, outcome: p.outcome }),
   );
 
@@ -244,26 +246,64 @@ export default function RatingGraph({
       ctx.fill();
 
       // Main line
-      ctx.beginPath();
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth = 2;
-      ctx.lineJoin = "round";
-      visible.forEach(({ game, rating }, i) => {
-        const x = toX(game);
-        const y = toY(rating);
-        if (i === 0) ctx.moveTo(x, y);
-        else {
-          const prev = visible[i - 1];
-          const px = toX(prev.game);
-          const py = toY(prev.rating);
-          const cp = (x - px) * 0.45;
-          ctx.bezierCurveTo(px + cp, py, x - cp, y, x, y);
-        }
-      });
-      ctx.stroke();
+      const FADE_START_INDEX = Math.max(0, visible.length - 20);
+
+      for (let i = 1; i < visible.length; i++) {
+        const curr = visible[i];
+        const prev = visible[i - 1];
+
+        const x = toX(curr.game);
+        const y = toY(curr.rating);
+        const px = toX(prev.game);
+        const py = toY(prev.rating);
+
+        const cp = (x - px) * 0.45;
+
+        // Fade logic
+        const distanceFromRecent = visible.length - i;
+        const alpha =
+          distanceFromRecent <= 20
+            ? 1
+            : Math.max(0.2, 1 - (distanceFromRecent - 20) * 0.05);
+
+        ctx.beginPath();
+        ctx.strokeStyle = lineColor;
+        ctx.globalAlpha = alpha;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+
+        ctx.moveTo(px, py);
+        ctx.bezierCurveTo(px + cp, py, x - cp, y, x, y);
+
+        ctx.stroke();
+      }
+
+      // reset alpha
+      ctx.globalAlpha = 1;
+
+      const trendPoints = visible.slice(-10);
+
+      if (trendPoints.length >= 2) {
+        const first = trendPoints[0];
+        const last = trendPoints[trendPoints.length - 1];
+
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(255,255,255,0.25)";
+        ctx.lineWidth = 1;
+
+        ctx.moveTo(toX(first.game), toY(first.rating));
+        ctx.lineTo(toX(last.game), toY(last.rating));
+
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       // Outcome dots (skip index 0 = origin)
-      visible.slice(1).forEach(({ game, rating, outcome }) => {
+      visible.slice(1).forEach(({ game, rating, outcome }, i) => {
+        const isRecent = i > visible.length - 20;
+
+        if (!isRecent && visible.length > 40) return;
         if (!outcome) return;
         const x = toX(game);
         const y = toY(rating);
@@ -280,6 +320,22 @@ export default function RatingGraph({
 
       // Live cursor dot at tip
       if (prog >= 0.99 && visible.length >= 2) {
+        if (visible.length >= 2) {
+          const last = visible[visible.length - 1];
+          const lx = toX(last.game);
+          const ly = toY(last.rating);
+
+          ctx.fillStyle = "#ff5540";
+          ctx.font = "700 10px system-ui,sans-serif";
+          ctx.textAlign = "left";
+
+          ctx.fillText(
+            String(last.rating),
+            Math.min(lx + 8, W - PAD.right - 30),
+            ly + 3,
+          );
+        }
+        
         const last = visible[visible.length - 1];
         const x = toX(last.game);
         const y = toY(last.rating);
@@ -391,7 +447,7 @@ export default function RatingGraph({
           closest = p;
         }
       });
-      if (closest && closestDist < 20) {
+      if (closest && closestDist < 30) {
         const cp = closest as RatingPoint;
         setHovered(cp);
         setHovX(toX(cp.game));
@@ -404,6 +460,34 @@ export default function RatingGraph({
   );
 
   const tier = getTierLabel(currentRating);
+
+  function compressPoints(points: RatingPoint[]) {
+    const MAX_POINTS = 32;
+    const RECENT_COUNT = 20;
+
+    if (points.length <= MAX_POINTS) return points;
+
+    const recent = points.slice(-RECENT_COUNT);
+    const older = points.slice(0, -RECENT_COUNT);
+
+    const bucketSize = Math.ceil(older.length / (MAX_POINTS - RECENT_COUNT));
+
+    const buckets: RatingPoint[] = [];
+
+    for (let i = 0; i < older.length; i += bucketSize) {
+      const chunk = older.slice(i, i + bucketSize);
+
+      const avg = chunk.reduce((s, p) => s + p.rating, 0) / chunk.length;
+
+      buckets.push({
+        game: chunk[chunk.length - 1].game,
+        rating: avg,
+        outcome: chunk[chunk.length - 1].outcome,
+      });
+    }
+
+    return [...buckets, ...recent];
+  }
 
   return (
     <div style={{ position: "relative" }}>

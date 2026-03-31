@@ -156,7 +156,6 @@ export default function HomeScreen({
         }}
         className="fade-up-1"
       >
-        <span className="t-label">Operator</span>
         <h1 className="t-head-lg" style={{ marginTop: 8 }}>
           {loading ? (
             <span className="blink" style={{ color: "var(--muted)" }}>
@@ -224,55 +223,21 @@ export default function HomeScreen({
           </div>
         </div>
       )}
-
-      {/* stats — online only */}
       {!isOffline && (
-        <section
+        <div
           style={{
             padding: "16px var(--pad) 0",
-            position: "relative",
-            zIndex: 1,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            opacity: 0.85,
           }}
-          className="fade-up-3"
+          className="fade-up-5"
         >
-          <span
-            className="t-label"
-            style={{ display: "block", marginBottom: 10 }}
-          >
-            Quick stats
+          <span className="t-body">
+            {loading ? "—" : `${wins}W ${losses}L ${draws}D`}
           </span>
-          <div className="stat-grid-3">
-            <StatCell value={loading ? "—" : wins} label="Wins" align="left" />
-            <div className="stat-div" />
-            <StatCell
-              value={loading ? "—" : losses}
-              label="Losses"
-              align="center"
-            />
-            <div className="stat-div" />
-            <StatCell
-              value={loading ? "—" : draws}
-              label="Draws"
-              align="right"
-            />
-          </div>
-          <div
-            className="stat-grid"
-            style={{ marginTop: 3, borderTop: "none" }}
-          >
-            <StatCell
-              value={loading ? "—" : winStreak}
-              label="Current streak"
-              align="left"
-            />
-            <div className="stat-div" />
-            <StatCell
-              value={loading ? "—" : (profile?.bestStreak ?? 0)}
-              label="Best streak"
-              align="right"
-            />
-          </div>
-        </section>
+        </div>
       )}
 
       <div
@@ -282,19 +247,10 @@ export default function HomeScreen({
           zIndex: 1,
         }}
         className="fade-up-4"
-      >
-        <span className="t-label">Actions</span>
-      </div>
+      ></div>
 
       {/* PLAY card — online shows matchmaking, offline shows local */}
-      <div
-        style={{
-          padding: "10px var(--pad) 0",
-          position: "relative",
-          zIndex: 1,
-        }}
-        className="fade-up-4"
-      >
+      <div style={{ padding: "10px var(--pad) 0" }} className="fade-up-4">
         {isOffline ? (
           <button
             className="mode-card"
@@ -317,7 +273,7 @@ export default function HomeScreen({
             />
             <span className="mode-card-coord">01 / LOCAL</span>
             <img
-              src="public/spartan.svg"
+              src="/spartan.svg"
               aria-hidden
               style={cardBgStyle("78%", -10, -14)}
             />
@@ -361,7 +317,7 @@ export default function HomeScreen({
             <div className="mode-card-bar" />
             <span className="mode-card-coord">01 / MATCH</span>
             <img
-              src="public/world-map.svg"
+              src="/world-map.svg"
               aria-hidden
               style={cardBgStyle("78%", -10, -14)}
             />
@@ -405,10 +361,10 @@ export default function HomeScreen({
           style={{
             flex: 1,
             textAlign: "left",
-            padding: "18px 16px",
-            minHeight: 120,
+            padding: "14px 12px", // ⬅️ reduced
+            minHeight: 96, // ⬅️ reduced
             overflow: "hidden",
-            opacity: isOffline ? 0.38 : 1,
+            opacity: isOffline ? 0.38 : 0.9,
             cursor: isOffline ? "not-allowed" : "pointer",
           }}
         >
@@ -426,7 +382,7 @@ export default function HomeScreen({
             02
           </span>
           <img
-            src="public/fingerprint.svg"
+            src="/fingerprint.svg"
             aria-hidden
             style={cardBgStyle("70%", -4, -8)}
           />
@@ -462,10 +418,10 @@ export default function HomeScreen({
           style={{
             flex: 1,
             textAlign: "left",
-            padding: "18px 16px",
-            minHeight: 120,
+            padding: "14px 12px", // ⬅️ reduced
+            minHeight: 96, // ⬅️ reduced
             overflow: "hidden",
-            opacity: isOffline ? 0.38 : 1,
+            opacity: isOffline ? 0.38 : 0.9,
             cursor: isOffline ? "not-allowed" : "pointer",
           }}
         >
@@ -483,7 +439,7 @@ export default function HomeScreen({
             03
           </span>
           <img
-            src="public/crown.svg"
+            src="/crown.svg"
             aria-hidden
             style={cardBgStyle("65%", -8, -8)}
           />
@@ -514,7 +470,13 @@ export default function HomeScreen({
 
       <div style={{ flex: 1 }} />
 
-      <div className="fade-up-6">
+      <div
+        className="fade-up-6"
+        style={{
+          marginTop: 8,
+          paddingBottom: "env(safe-area-inset-bottom)",
+        }}
+      >
         <div className="device-tag">
           <span className="device-tag-label">Device</span>
           <span className="device-tag-value">
