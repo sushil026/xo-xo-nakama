@@ -343,7 +343,7 @@ function MyRankBar({ entry }: { entry: LeaderboardEntry }) {
             letterSpacing: -0.5,
           }}
         >
-          {entry.subscore}
+          {entry.score}
         </div>
         <div
           style={{
@@ -480,7 +480,7 @@ function PodiumCard({
               letterSpacing: -0.5,
             }}
           >
-            {entry.subscore}
+            {entry.score}
             <span
               style={{
                 fontSize: 8,
@@ -1090,158 +1090,6 @@ export default function LeaderboardScreen({ onBack }: Props) {
         </span>
       </header>
 
-      {/* Placement banner */}
-      {!loading &&
-        !error &&
-        (!myRecord || myRecord.rank === 0) &&
-        entries.length > 0 && (
-          <div
-            style={{
-              margin: "12px 14px 0",
-              padding: "10px 14px",
-              background: "rgba(240,160,80,0.05)",
-              border: "1px solid rgba(240,160,80,0.18)",
-              borderLeft: "3px solid rgba(240,160,80,0.5)",
-              borderRadius: 4,
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-            }}
-          >
-            {/* Header row */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 8,
-                  fontWeight: 700,
-                  letterSpacing: 2.5,
-                  textTransform: "uppercase",
-                  color: "var(--amber)",
-                }}
-              >
-                ▸ Placement phase
-              </span>
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 8,
-                  fontWeight: 900,
-                  color: "var(--amber)",
-                }}
-              >
-                {myGamesPlayed} / 3 games
-              </span>
-            </div>
-
-            {/* Delta pills — compact single row */}
-            <div style={{ display: "flex", gap: 6 }}>
-              {[
-                {
-                  label: "Win",
-                  value: "+30",
-                  color: "var(--coral)",
-                  bg: "rgba(255,85,64,0.07)",
-                  border: "rgba(255,85,64,0.2)",
-                },
-                {
-                  label: "Loss",
-                  value: "−15",
-                  color: "var(--amber)",
-                  bg: "rgba(240,160,80,0.07)",
-                  border: "rgba(240,160,80,0.2)",
-                },
-                {
-                  label: "Draw",
-                  value: "±0",
-                  color: "var(--muted)",
-                  bg: "rgba(255,255,255,0.03)",
-                  border: "var(--rim)",
-                },
-              ].map(({ label, value, color, bg, border }) => (
-                <div
-                  key={label}
-                  style={{
-                    flex: 1,
-                    padding: "6px 8px",
-                    background: bg,
-                    border: `1px solid ${border}`,
-                    borderRadius: 3,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                  }}
-                >
-                  <span
-                    style={{
-                      fontFamily: "var(--font-display)",
-                      fontSize: 7,
-                      fontWeight: 700,
-                      letterSpacing: 1.5,
-                      textTransform: "uppercase",
-                      color: "var(--muted)",
-                    }}
-                  >
-                    {label}
-                  </span>
-                  <span
-                    style={{
-                      fontFamily: "var(--font-display)",
-                      fontSize: 14,
-                      fontWeight: 900,
-                      color,
-                      lineHeight: 1,
-                    }}
-                  >
-                    {value}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            {/* Progress bar */}
-            <div>
-              <div
-                style={{
-                  height: 3,
-                  width: `${(myGamesPlayed / 3) * 100}%`,
-                  background: "rgba(255,255,255,0.06)",
-                  borderRadius: 2,
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: "0%",
-                    background: "var(--amber)",
-                    borderRadius: 2,
-                  }}
-                />
-              </div>
-              <span
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 7,
-                  color: "var(--muted)",
-                  letterSpacing: 1,
-                  marginTop: 4,
-                  display: "block",
-                }}
-              >
-                Play your first game to earn a rank. After 3 games rating
-                stabilises to +10 / −5.
-              </span>
-            </div>
-          </div>
-        )}
-
       {/*  Tab strip  */}
       <div
         style={{
@@ -1327,7 +1175,7 @@ export default function LeaderboardScreen({ onBack }: Props) {
           </div>
         )}
 
-        {!loading && !error && entries.length === 0 && (
+        {!loading && !error && (!myRecord || myRecord.rank === 0) && (
           <EmptyState tab={tab} gamesPlayed={myGamesPlayed} />
         )}
 

@@ -77,9 +77,9 @@ export interface LeaderboardEntry {
   rank: number;
   username: string;
   userId: string;
-  score: number; // wins
-  subscore: number; // rating
-  wins: number;
+  score: number; // rating (primary sort)
+  subscore: number; // composite tiebreaker (wins/loss ratio encoded)
+  wins: number; // from profile fetch — used for display only
   losses: number;
   draws: number;
 }
@@ -483,8 +483,8 @@ export const getLeaderboard = async (
     rank: Number(r.rank ?? i + 1),
     username: r.username || "",
     userId: r.owner_id ?? "",
-    score: Number(r.score ?? 0),
-    subscore: Number(r.subscore ?? 0),
+    score: Number(r.score ?? 0), // rating
+    subscore: Number(r.subscore ?? 0), // encoded tiebreaker
     wins: 0,
     losses: 0,
     draws: 0,
@@ -601,8 +601,8 @@ export const getMyLeaderboardRecord = async (
     rank: Number(r.rank ?? 0),
     username,
     userId: r.owner_id ?? "",
-    score: Number(r.score ?? 0),
-    subscore: Number(r.subscore ?? 0),
+    score: Number(r.score ?? 0), // rating
+    subscore: Number(r.subscore ?? 0), // wins (tiebreaker)
     wins,
     losses,
     draws,

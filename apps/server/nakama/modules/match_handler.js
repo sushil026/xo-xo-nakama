@@ -88,7 +88,7 @@ function submitLeaderboard(
   gamesPlayed,
 ) {
   // [XO:LB] Threshold check — skips submit if player has fewer than 5 games
-  if (gamesPlayed < 5) {
+  if (gamesPlayed < 3) {
     logger.info(
       "[XO:LB] Skipping leaderboard submit for " +
         userId.slice(0, 8) +
@@ -103,7 +103,7 @@ function submitLeaderboard(
 
   // [XO:LB] Writing all-time leaderboard record — score=wins, subscore=rating
   try {
-    nk.leaderboardRecordWrite("xo_alltime", userId, name, wins, rating, {});
+    nk.leaderboardRecordWrite("xo_alltime", userId, name, rating, tiebreaker, {});
     logger.info(
       "[XO:LB] xo_alltime updated for " +
         userId.slice(0, 8) +
@@ -121,7 +121,7 @@ function submitLeaderboard(
 
   // [XO:LB] Writing monthly leaderboard record — resets on cron "0 0 1 * *"
   try {
-    nk.leaderboardRecordWrite("xo_monthly", userId, name, wins, rating, {});
+    nk.leaderboardRecordWrite("xo_monthly", userId, name, rating, tiebreaker, {});
     logger.info(
       "[XO:LB] xo_monthly updated for " +
         userId.slice(0, 8) +
@@ -1056,6 +1056,7 @@ function rpcCreateRoom(ctx, logger, nk, payload) {
       isPublic: isPublic ? "true" : "false",
       roomCode: roomCode,
       hostUserId: hostUserId,
+      gameMode: isPublic ? "room_public" : "room_private",
     });
     // [XO:RPC] Match created successfully — returning matchId + code to client
     logger.info(

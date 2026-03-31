@@ -1,20 +1,25 @@
 # XO Multiplayer — Nakama Server-Authoritative Game
 
-A real-time multiplayer Tic-Tac-Toe game built using a **server-authoritative architecture with Nakama**, focusing on consistency, fairness, and clean system design.
+A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nakama backend**, focused on fairness, reliability, and a clean full-stack architecture.
 
 ---
 
 ## Features
 
-* Real-time multiplayer gameplay (WebSocket-based)
+* Real-time online gameplay over WebSockets
 * Server-authoritative game logic (validated moves, no client trust)
-* Automatic matchmaking (2-player pairing)
-* Turn-based gameplay with **server-side timer enforcement**
-* Match result storage and player profile updates
-* Reconnect handling with state resync
-* Local (pass-and-play) mode
-* Modular frontend architecture using React + hooks
-* Mobile-friendly responsive UI
+* Auto-matchmaking (2-player pairing)
+* Public/private room system with shareable room codes
+* Host knock-and-accept flow for room entry control
+* Server-side turn timer enforcement (30s per move)
+* Forfeit, timeout, draw, and standard win handling
+* Persistent profiles (rating, streaks, games played)
+* Match history with detailed move sequence and mini-board replay
+* Dual leaderboards: **All-time** and **Monthly (resets on the 1st)**
+* Profile analytics (opening heatmap, activity heatmap, rating progression)
+* Reconnect-safe state resync
+* Local pass-and-play mode
+* Mobile-friendly, tactical UI style
 
 ---
 
@@ -35,8 +40,11 @@ A real-time multiplayer Tic-Tac-Toe game built using a **server-authoritative ar
 │       │   │   ├── game
 │       │   │   ├── home
 │       │   │   ├── landing
+│       │   │   ├── leaderboard
 │       │   │   ├── matchmaking
-│       │   │   └── modes
+│       │   │   ├── modes
+│       │   │   ├── profile
+│       │   │   └── rooms
 │       │   ├── services
 │       │   └── utils
 │       └── ...
@@ -56,10 +64,10 @@ A real-time multiplayer Tic-Tac-Toe game built using a **server-authoritative ar
 
 ```
 React Client
-   ↓ WebSocket
-Nakama Server (Match Handler)
+   ↓ WebSocket + RPC
+Nakama Server (Authoritative Match Handler)
    ↓
-Storage (Profiles, Matches)
+Storage (profiles, matches, rooms, history, analytics)
 ```
 
 ---
@@ -68,93 +76,145 @@ Storage (Profiles, Matches)
 
 ### 1. Server-Authoritative Gameplay
 
-* All game logic runs on the Nakama server
-* Client only sends:
+* All match logic runs on Nakama (`match_handler.js`)
+* Client sends minimal intents:
 
+  ```json
+  { "index": number }
   ```
-  { index: number }
-  ```
+
+  or control actions (knock/accept/decline/close)
 * Server validates:
 
   * Turn ownership
   * Cell availability
-  * Game rules
+  * Payload shape and legality
+  * End-state transitions
 
-This ensures:
+This guarantees:
 
-* No client-side cheating
-* Consistent state across players
+* Strong anti-cheat baseline
+* Single source of truth for all clients
+* Predictable outcomes across reconnects
 
 ---
 
-### 2. Match Lifecycle
+### 2. Match Modes and Lifecycle
 
-1. Client connects using device ID
-2. Player enters matchmaking queue
-3. Nakama pairs players
-4. Match is created and joined
-5. Server controls:
+Two authoritative entry paths:
 
-   * Board state
-   * Turn switching
-   * Timer
-   * Winner
+1. **Matchmaker flow**
+
+   * Client enters queue
+   * Nakama pairs 2 players
+   * Match starts immediately when both join
+
+2. **Room flow**
+
+   * Host creates public/private room
+   * Joiner browses or enters room code
+   * Joiner sends knock
+   * Host accepts/declines
+   * Accepted knock starts game
+
+Lifecycle ownership remains server-side for:
+
+* Board state
+* Turn switching
+* Timer and timeout resolution
+* Winner/draw decision
+* Persistent storage writes
 
 ---
 
 ### 3. Timer System (Server-Side)
 
-* Each turn has a fixed duration (30 seconds)
-* Server tracks:
+* Turn duration: **30 seconds**
+* Server tracks `state.turnStartTime`
+* On timeout:
 
-  ```
-  state.turnStartTime
-  ```
-* If exceeded:
+  * Active player loses by timeout
+  * Opponent is declared winner
+  * Result is persisted with end reason
 
-  * Current player loses
-  * Opponent wins automatically
-
-Client:
-
-* Displays countdown
-* Does not enforce timeout
+Client only renders countdown; it does not enforce timeout outcomes.
 
 ---
 
-### 4. Data Storage
+### 4. Rating Model and Competitive Gate
 
-#### Profile (`profile` collection)
+* Starting rating: **800**
+* Provisional phase: first **3 games**
+
+  * Win: +30
+  * Loss: -15
+  * Draw: +/-0
+* Stable phase (post-provisional):
+
+  * Win: +10
+  * Loss: -5
+  * Draw: +/-0
+* Rating floor: 0
+* Leaderboard eligibility threshold: 3+ games played
+
+---
+
+### 5. Data Storage
+
+#### Profile (`profile` / `data`)
 
 ```json
 {
+  "username": "PLAYER_01",
   "wins": 0,
   "losses": 0,
   "draws": 0,
-  "rating": 1200
+  "rating": 800,
+  "winStreak": 0,
+  "bestStreak": 0,
+  "gamesPlayed": 0
 }
 ```
 
----
-
-#### Match Data (`matches` collection)
+#### Match Record (`matches` / `{matchId}`)
 
 ```json
 {
   "matchId": "...",
-  "players": [...],
-  "moves": [0,4,1],
-  "winner": "X"
+  "gameMode": "matchmaker",
+  "players": [{ "userId": "...", "symbol": "X", "username": "P1" }],
+  "moves": [0, 4, 1, 3],
+  "winner": "X",
+  "endReason": "win",
+  "openingCell": 0,
+  "createdAt": 1710000000000
 }
 ```
 
----
-
-#### User Match History (`user_matches`)
+#### User Match History (`user_matches` / `list`)
 
 ```json
 {
-  "matches": ["match1", "match2"]
+  "matches": ["latestMatchId", "olderMatchId"]
+}
+```
+
+#### Room Mapping
+
+* `rooms/{roomCode}` → forward lookup (`roomCode -> matchId`)
+* `room_index/{matchId}` → reverse metadata for public room listing
+
+#### Client Analytics (`analytics` / `data`)
+
+```json
+{
+  "openingStats": [[0, 0, 0], "...9 cells total"],
+  "cellHeatmap": [[0, 0, 0], "...9 cells total"],
+  "totalMoves": 0,
+  "avgMovesPerGame": 0,
+  "timeoutLosses": 0,
+  "forfeitLosses": 0,
+  "gamesPlayed": 0
 }
 ```
 
@@ -164,29 +224,31 @@ Client:
 
 ### Screens
 
-* `LandingScreen` — device init, username selection
-* `HomeScreen` — quick stats and navigation
-* `ModesScreen` — game mode selection
-* `MatchmakingScreen` — queue and match finding
-* `OnlineGameScreen` — multiplayer gameplay
-* `LocalGame` — offline pass-and-play
-
----
+* `LandingScreen` — device init and username setup
+* `HomeScreen` — quick stats and navigation hub
+* `ModesScreen` — game mode entry
+* `MatchmakingScreen` — queue and auto-pair flow
+* `RoomScreen` — create/browse/join-by-code room system
+* `OnlineGameScreen` — authoritative multiplayer board
+* `ProfileScreen` — profile, analytics, rating progression
+* `MatchHistoryScreen` — detailed recent match history
+* `LeaderboardScreen` — monthly/all-time rankings
 
 ### Core Modules
 
 #### `useGame.ts`
 
-* Socket connection
-* Match join/create
-* Sending moves
-* Receiving game state
+* Socket lifecycle
+* Match join/create logic
+* Sending moves and handling server state
+* Reconnect and resync behavior
 
 #### `nakamaClient.ts`
 
-* Connection handling
-* Session management
-* Socket reuse
+* Device authentication + session bootstrap
+* Shared socket reuse
+* Profile/history/leaderboard/room service functions
+* RPC wrappers for room creation, join-by-code, and public-room listing
 
 ---
 
@@ -194,17 +256,22 @@ Client:
 
 ### Match Handler (`match_handler.js`)
 
-Handles:
+Responsible for:
 
-* Match initialization
-* Player join/leave
-* Move validation
-* Turn management
-* Timer enforcement
-* Match result storage
-* Profile updates
+* Match init and labels (`waiting_public`, `waiting_private`, `active`)
+* Join/rejoin enforcement
+* Knock flow + host response flow
+* Move validation and turn switching
+* Timeout / forfeit / draw / win finalization
+* Match persistence and profile/rating updates
+* Room record lifecycle (create/delete)
+* Leaderboard record updates
 
----
+### Registered RPCs
+
+* `xo_create_room` — create public/private room and return `matchId + roomCode`
+* `xo_join_by_code` — resolve code to live match with capacity checks
+* `xo_list_public_rooms` — return only waiting public rooms (server-filtered)
 
 ### Matchmaker
 
@@ -212,31 +279,38 @@ Handles:
 socket.addMatchmaker("*", 2, 2);
 ```
 
-* Automatically pairs 2 players
-* Creates match via `matchmakerMatched`
+* Automatically pairs exactly 2 players
+* Creates authoritative match via `matchmakerMatched`
 
 ---
 
 ## API / Communication
 
-### Client → Server
+### Client → Server (match state opCodes)
 
-```json
-{ "index": number }
-```
+* `1` — standard gameplay payload (`{ index }` / resync / forfeit)
+* `2` — knock request
+* `3` — host accept/decline knock
+* `4` — host close room
 
----
+### Client → Server (RPC)
+
+* `xo_create_room`
+* `xo_join_by_code`
+* `xo_list_public_rooms`
 
 ### Server → Client
 
-Full state broadcast:
+State broadcast includes (shape abbreviated):
 
 ```json
 {
   "board": [],
   "players": [],
+  "phase": "waiting | knocking | active | declined | expired",
   "turn": "...",
-  "winner": null
+  "winner": null,
+  "moves": []
 }
 ```
 
@@ -247,17 +321,14 @@ Full state broadcast:
 ### Prerequisites
 
 * Node.js
-* Docker
+* Docker / Docker Compose
 
----
-
-### Start Nakama
+### Start Backend (Postgres + Nakama)
 
 ```bash
+cd infra/docker
 docker-compose up
 ```
-
----
 
 ### Run Frontend
 
@@ -267,12 +338,18 @@ npm install
 npm run dev
 ```
 
----
+### Local Configuration
 
-### Configuration
+Current web config points to host machine on port `7350`:
 
 ```ts
-new Client("defaultkey", "127.0.0.1", "7350", false);
+const config = {
+  nakama: {
+    host: window.location.hostname,
+    port: "7350",
+    ssl: false
+  }
+};
 ```
 
 ---
@@ -281,50 +358,54 @@ new Client("defaultkey", "127.0.0.1", "7350", false);
 
 ### Same Machine
 
-* Open:
+* Open one normal browser window and one incognito window
+* Test both:
 
-  * One normal tab
-  * One incognito tab
-* Start matchmaking on both
-
----
+  * Matchmaker flow (quick online match)
+  * Room flow (create room, join by code, knock acceptance)
 
 ### Expected Behavior
 
-* Players get matched automatically
+* Matchmaker pairs two players
+* Room browser shows only waiting public rooms
+* Private rooms are joinable by code only
+* Knock/accept/decline behaves consistently
 * Moves sync in real-time
-* Turn restriction enforced
-* Timer triggers server-side win
-* Reconnect restores state
+* Turn restriction is enforced server-side
+* Timeout produces authoritative winner
+* Match result is persisted and appears in history/profile
+* Leaderboards update after eligibility threshold
 
 ---
 
 ## Design Approach
 
-* Minimal, tactical UI inspired by structured layouts
-* Emphasis on readability and quick state recognition
-* Clean separation between UI and logic
+* Minimal tactical UI with strong information hierarchy
+* Emphasis on quick state readability and low visual noise
+* Separation of concerns across UI, transport, and authoritative game logic
+* Operational observability through structured server log prefixes
 
 ---
 
 ## AI-Assisted Development
 
-This project was built using AI-assisted tooling:
+This project was developed with AI-assisted tooling:
 
-* Cursor — development and refactoring
-* ChatGPT — system design, debugging, architecture decisions
-* Claude — reasoning and structuring flows
+* Cursor — implementation and refactoring workflows
+* ChatGPT — architecture, debugging, and systems reasoning
+* Claude — flow structuring and iteration support
 
-AI was used as a development accelerator while maintaining manual control over logic and implementation.
+AI was used as an accelerator while keeping implementation decisions and validation under manual engineering control.
 
 ---
 
 ## Upcoming
 
-* AI opponent (adaptive and non-deterministic gameplay)
-* Leaderboard system
-* Match analytics (openings, win rates, heatmaps)
-* Custom room creation and joining
+* AI opponent (adaptive, non-deterministic behavior)
+* Friend system / direct challenges
+* Custom room policies (timeouts, rematch toggles, variants)
+* Deeper analytics dashboards (openings, conversion, trend overlays)
+* Improved host-room persistence when leaving room screen
 
 ---
 
@@ -332,9 +413,10 @@ AI was used as a development accelerator while maintaining manual control over l
 
 This project demonstrates:
 
-* Real-time multiplayer systems
-* Server-authoritative game design
-* Scalable match handling
-* Structured frontend architecture
+* Real-time multiplayer systems design
+* Server-authoritative game architecture
+* Production-style match and room lifecycle handling
+* Persisted competitive progression (rating + leaderboard)
+* Structured, scalable frontend feature architecture
 
 ---

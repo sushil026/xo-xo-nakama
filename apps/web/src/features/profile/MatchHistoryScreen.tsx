@@ -371,6 +371,7 @@ function MatchRow({
             >
               {endReasonLabel(match.endReason)}
             </span>
+            <GameModePill mode={match.gameMode} />
           </div>
 
           <div
@@ -954,6 +955,44 @@ function LoadingState() {
         </span>
       </div>
     </>
+  );
+}
+
+function GameModePill({ mode }: { mode: StoredMatch["gameMode"] }) {
+  const cfg = {
+    matchmaker: {
+      label: "MATCHMAKING",
+      color: "var(--muted)",
+      border: "var(--rim)",
+    },
+    room_public: {
+      label: "PUBLIC ROOM",
+      color: "#7eb8c9",
+      border: "rgba(126,184,201,0.35)",
+    },
+    room_private: {
+      label: "PRIVATE ROOM",
+      color: "#a78fd0",
+      border: "rgba(167,143,208,0.35)",
+    },
+  }[mode] ?? { label: mode, color: "var(--muted)", border: "var(--rim)" };
+
+  return (
+    <span
+      style={{
+        fontFamily: "var(--font-display)",
+        fontSize: 8,
+        fontWeight: 700,
+        letterSpacing: 1.5,
+        color: cfg.color,
+        border: `1px solid ${cfg.border}`,
+        borderRadius: 2,
+        padding: "2px 6px",
+        lineHeight: 1,
+      }}
+    >
+      {cfg.label}
+    </span>
   );
 }
 
