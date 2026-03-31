@@ -1458,7 +1458,7 @@ function JoinCodeTab({ onJoin }: { onJoin: Props["onJoin"] }) {
 
       if (!result.ok) {
         setStatus("error");
-        const failed = result as {
+        const failed = result as unknown as {
           ok: false;
           error: "not_found" | "full" | "unknown";
         };
