@@ -3,6 +3,7 @@ import {
   connect,
   createRoom,
   joinByCode,
+  JoinByCodeResult,
   listPublicRooms,
   type RoomInfo,
 } from "../../services/nakamaClient";
@@ -455,7 +456,7 @@ function CreateTab({
         );
       });
     });
-  }, [restoredRoom]);
+  }, [onJoin, restoredRoom]);
 
   const handleCreate = async () => {
     setStatus("creating");
@@ -546,7 +547,9 @@ function CreateTab({
         4,
         new TextEncoder().encode(JSON.stringify({})),
       );
-    } catch {}
+    } catch {
+      // ignore
+    }
     localStorage.removeItem("xo_active_room");
     // Stop ticker
     if (tickerRef.current !== null) {
@@ -1063,17 +1066,6 @@ function BrowseTab({ onJoin }: { onJoin: Props["onJoin"] }) {
     }
   };
 
-  const handleTimeout = (matchId: string) => {
-    setRoomState(matchId, "timeout");
-    connect()
-      .then(({ socket }) => {
-        socket.leaveMatch(matchId).catch(() => {});
-      })
-      .catch(() => {});
-    listenerCleanups.current[matchId]?.();
-    delete listenerCleanups.current[matchId];
-  };
-
   const handleRetry = (matchId: string) => {
     setRoomState(matchId, "idle");
     handleJoin(matchId);
@@ -1448,10 +1440,11 @@ function JoinCodeTab({ onJoin }: { onJoin: Props["onJoin"] }) {
 
     try {
       const { session } = await connect();
-      const result = await joinByCode(session, clean);
 
       // FIX: narrow the discriminated union before accessing .error
-      if (!result.ok) {
+      const result = (await joinByCode(session, clean)) as JoinByCodeResult;
+
+      if (result.ok === false) {
         setStatus("error");
         setErrorMsg(
           result.error === "not_found"
@@ -1463,22 +1456,27 @@ function JoinCodeTab({ onJoin }: { onJoin: Props["onJoin"] }) {
         return;
       }
 
+      if (!result.ok) {
+        setStatus("error");
+        const failed = result as {
+          ok: false;
+          error: "not_found" | "full" | "unknown";
+        };
+        setErrorMsg(
+          failed.error === "not_found"
+            ? "Room not found. Double-check the code."
+            : failed.error === "full"
+              ? "That room is already full."
+              : "Something went wrong. Try again.",
+        );
+        return;
+      }
+
       joinedMatchRef.current = result.matchId;
       await doAttachAndKnock(result.matchId);
     } catch {
       setStatus("error");
       setErrorMsg("Connection error. Check your network and try again.");
-    }
-  };
-
-  const handleTimeout = () => {
-    setStatus("timeout");
-    if (joinedMatchRef.current) {
-      connect()
-        .then(({ socket }) => {
-          socket.leaveMatch(joinedMatchRef.current!).catch(() => {});
-        })
-        .catch(() => {});
     }
   };
 
