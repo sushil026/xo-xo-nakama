@@ -1,2 +1,2 @@
 [deploy]
-startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address $DATABASE_URL; do sleep 2; done && exec /nakama/nakama --name nakama1 --database.address $DATABASE_URL --logger.level INFO --console.username admin --console.password $CONSOLE_PASSWORD --runtime.js_entrypoint match_handler.js'"
+startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address $DATABASE_URL; do sleep 2; done && exec /nakama/nakama --name nakama1 --database.address $DATABASE_URL --logger.level INFO --console.username admin --console.password $CONSOLE_PASSWORD --runtime.js_entrypoint matches/xoxo.js'"
