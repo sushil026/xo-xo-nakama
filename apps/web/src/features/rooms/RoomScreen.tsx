@@ -1453,10 +1453,11 @@ function JoinCodeTab({ onJoin }: { onJoin: Props["onJoin"] }) {
       // FIX: narrow the discriminated union before accessing .error
       if (!result.ok) {
         setStatus("error");
+        const err = result.error;
         setErrorMsg(
-          result.error === "not_found"
+          err === "not_found"
             ? "Room not found. Double-check the code."
-            : result.error === "full"
+            : err === "full"
               ? "That room is already full."
               : "Something went wrong. Try again.",
         );

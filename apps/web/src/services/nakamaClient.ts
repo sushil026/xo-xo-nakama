@@ -711,11 +711,16 @@ export const joinByCode = async (
       roomCode: roomCode.toUpperCase().replace(/[^A-Z0-9]/g, ""),
     });
     const payload = res.payload as { matchId?: string; error?: string };
+
     if (payload.error) {
-      const err = payload.error as "not_found" | "full";
-      return { ok: false, error: err ?? "unknown" };
+      const err =
+        payload.error === "not_found" || payload.error === "full"
+          ? payload.error
+          : "unknown";
+
+      return { ok: false, error: err } as const;
     }
-    return { ok: true, matchId: payload.matchId! };
+    return { ok: true, matchId: payload.matchId! } as const;
   } catch {
     return { ok: false, error: "unknown" };
   }
