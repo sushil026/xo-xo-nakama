@@ -332,7 +332,11 @@ function CreateTab({
   restoredRoom,
 }: {
   onJoin: Props["onJoin"];
-  restoredRoom: { matchId: string; roomCode: string; expiresAt?: number } | null;
+  restoredRoom: {
+    matchId: string;
+    roomCode: string;
+    expiresAt?: number;
+  } | null;
 }) {
   const [isPublic, setIsPublic] = useState(true);
   const [status, setStatus] = useState<
@@ -1446,12 +1450,14 @@ function JoinCodeTab({ onJoin }: { onJoin: Props["onJoin"] }) {
       const { session } = await connect();
       const result = await joinByCode(session, clean);
 
+      // FIX: narrow the discriminated union before accessing .error
       if (!result.ok) {
         setStatus("error");
+        const err = result.error;
         setErrorMsg(
-          result.error === "not_found"
+          err === "not_found"
             ? "Room not found. Double-check the code."
-            : result.error === "full"
+            : err === "full"
               ? "That room is already full."
               : "Something went wrong. Try again.",
         );

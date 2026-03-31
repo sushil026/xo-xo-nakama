@@ -231,6 +231,8 @@ interface Props {
   matchId: string;
   opponentName: string;
   iAmX: boolean; // hint only — server state is authoritative
+  // FIX: added gameMode prop so StoredMatch can be fully constructed
+  gameMode?: StoredMatch["gameMode"];
   onBack: () => void;
 }
 
@@ -241,6 +243,7 @@ export default function OnlineGameScreen({
   matchId,
   opponentName,
   iAmX,
+  gameMode = "room_public",
   onBack,
 }: Props) {
   //  State
@@ -302,6 +305,12 @@ export default function OnlineGameScreen({
   }, [clearTimer]);
 
   //  Analytics
+  // FIX: capture gameMode in closure via ref so it's always current
+  const gameModeRef = useRef(gameMode);
+  useEffect(() => {
+    gameModeRef.current = gameMode;
+  }, [gameMode]);
+
   const recordAnalytics = useCallback((ss: ServerState, d: DerivedState) => {
     if (analyticsRecordedRef.current || !d.endReason) return;
     analyticsRecordedRef.current = true;
@@ -314,6 +323,8 @@ export default function OnlineGameScreen({
         endReason: d.endReason!,
         openingCell: ss.moves.length > 0 ? ss.moves[0] : null,
         createdAt: Date.now(),
+        // FIX: was referencing undefined `currentGameMode`; now uses prop via ref
+        gameMode: gameModeRef.current,
       };
       recordMatchAnalytics(session, storedMatch, d.mySymbol ?? "X").catch(
         () => {},

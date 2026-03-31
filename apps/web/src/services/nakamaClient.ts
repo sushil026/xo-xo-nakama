@@ -666,6 +666,8 @@ export const listOpenRooms = async (
       roomCode: meta.roomCode ?? "",
       isPublic: true,
       size: m.size ?? 1,
+      // FIX: hostUserId was missing from this object, causing TS2741
+      hostUserId: meta.hostUserId ?? null,
       hostUsername: meta.hostUsername ?? null,
       createdAt: meta.createdAt ?? 0,
     } satisfies RoomInfo;
