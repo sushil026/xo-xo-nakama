@@ -31,6 +31,172 @@ interface MatchState {
 
 const DEBUG_FORCE_OFFLINE = false;
 
+function InstallBanner() {
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const isAndroid = /android/i.test(navigator.userAgent);
+  const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
+  const [dismissed, setDismissed] = useState(
+    () => localStorage.getItem("xo_install_dismissed") === "1",
+  );
+
+  if (isStandalone || (!isIOS && !isAndroid) || dismissed) return null;
+
+  const dismiss = () => {
+    localStorage.setItem("xo_install_dismissed", "1");
+    setDismissed(true);
+  };
+
+  return (
+    <>
+      {/* Dark backdrop — click anywhere to dismiss */}
+      <div
+        onClick={dismiss}
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 998,
+          background: "rgba(0,0,0,0.72)",
+          backdropFilter: "blur(3px)",
+        }}
+      />
+
+      {/* Banner card */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 32,
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: "calc(100% - 48px)",
+          maxWidth: 340,
+          zIndex: 999,
+          background: "rgba(14,14,14,0.98)",
+          border: "1px solid rgba(139,124,246,0.4)",
+          borderTop: "3px solid rgba(139,124,246,0.8)",
+          borderRadius: 8,
+          boxShadow: "0 8px 40px rgba(0,0,0,0.7)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "14px 16px 10px",
+            borderBottom: "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: 2,
+              textTransform: "uppercase",
+              color: "#8B7CF6",
+            }}
+          >
+            Install XO
+          </div>
+          <button
+            type="button"
+            onClick={dismiss}
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 4,
+              color: "var(--muted)",
+              fontSize: 12,
+              cursor: "pointer",
+              padding: "3px 8px",
+              lineHeight: 1.4,
+              fontFamily: "var(--font-display)",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "16px" }}>
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 11,
+              color: "var(--muted)",
+              letterSpacing: 0.4,
+              lineHeight: 1.8,
+              marginBottom: 14,
+            }}
+          >
+            {isIOS ? (
+              <>
+                <div style={{ marginBottom: 8, color: "var(--soft)" }}>
+                  Add to your home screen for the full app experience — no App
+                  Store needed.
+                </div>
+                <div>
+                  1. Tap the <span style={{ color: "#8B7CF6" }}>Share</span>{" "}
+                  button in Safari
+                </div>
+                <div>
+                  2. Scroll down and tap{" "}
+                  <span style={{ color: "#8B7CF6" }}>Add to Home Screen</span>
+                </div>
+                <div>
+                  3. Tap <span style={{ color: "#8B7CF6" }}>Add</span> to
+                  confirm
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ marginBottom: 8, color: "var(--soft)" }}>
+                  Install as an app — plays fullscreen, no browser chrome.
+                </div>
+                <div>
+                  1. Tap the <span style={{ color: "#8B7CF6" }}>⋮ menu</span> in
+                  Chrome
+                </div>
+                <div>
+                  2. Tap{" "}
+                  <span style={{ color: "#8B7CF6" }}>Add to Home Screen</span>
+                </div>
+                <div>
+                  3. Tap <span style={{ color: "#8B7CF6" }}>Add</span> to
+                  confirm
+                </div>
+              </>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={dismiss}
+            style={{
+              width: "100%",
+              padding: "10px",
+              background: "rgba(139,124,246,0.12)",
+              border: "1px solid rgba(139,124,246,0.3)",
+              borderRadius: 4,
+              fontFamily: "var(--font-display)",
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 1.5,
+              textTransform: "uppercase",
+              color: "#8B7CF6",
+              cursor: "pointer",
+            }}
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>("landing");
   const [matchState, setMatchState] = useState<MatchState | null>(null);
@@ -50,8 +216,6 @@ export default function App() {
     };
   }, []);
 
-  // Shared handler: once any flow (matchmaking OR room) has a match ready,
-  // stash the state and navigate to the game screen.
   const handleMatchFound = (
     matchId: string,
     opponentName: string,
@@ -61,41 +225,52 @@ export default function App() {
     setScreen("game");
   };
 
+  const banner = <InstallBanner />;
+
   //  Landing
   if (screen === "landing") {
     return (
-      <LandingScreen
-        isOffline={isOffline}
-        onStart={() => setScreen("home")}
-        onPlayLocal={() => setScreen("local-game")}
-      />
+      <>
+        <LandingScreen
+          isOffline={isOffline}
+          onStart={() => setScreen("home")}
+          onPlayLocal={() => setScreen("local-game")}
+        />
+        {banner}
+      </>
     );
   }
 
   //  Home
   if (screen === "home") {
     return (
-      <HomeScreen
-        isOffline={isOffline}
-        onPlay={() => setScreen("modes")}
-        onLocalGame={() => setScreen("local-game")}
-        onProfile={() => setScreen("profile")}
-        onLeaderboard={() => setScreen("leaderboard")}
-      />
+      <>
+        <HomeScreen
+          isOffline={isOffline}
+          onPlay={() => setScreen("modes")}
+          onLocalGame={() => setScreen("local-game")}
+          onProfile={() => setScreen("profile")}
+          onLeaderboard={() => setScreen("leaderboard")}
+        />
+        {banner}
+      </>
     );
   }
 
   //  Modes
   if (screen === "modes") {
     return (
-      <ModesScreen
-        isOffline={isOffline}
-        onBack={() => setScreen("home")}
-        onMatchmaking={() => setScreen("matchmaking")}
-        onLocal={() => setScreen("local-game")}
-        onAI={() => console.log("ai — coming soon")}
-        onShare={() => setScreen("room")}
-      />
+      <>
+        <ModesScreen
+          isOffline={isOffline}
+          onBack={() => setScreen("home")}
+          onMatchmaking={() => setScreen("matchmaking")}
+          onLocal={() => setScreen("local-game")}
+          onAI={() => console.log("ai — coming soon")}
+          onShare={() => setScreen("room")}
+        />
+        {banner}
+      </>
     );
   }
 
@@ -109,7 +284,7 @@ export default function App() {
     );
   }
 
-  //  Room screen (Create & Share / Browse / Join by code)
+  //  Room screen
   if (screen === "room") {
     return (
       <RoomScreen onBack={() => setScreen("modes")} onJoin={handleMatchFound} />
