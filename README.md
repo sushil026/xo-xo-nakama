@@ -35,6 +35,7 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 - Reconnect-safe state resync
 - Local pass-and-play mode
 - Mobile-friendly, tactical UI style
+- Installable as PWA on iOS (Safari) and Android (Chrome) — no app store required
 
 ---
 
@@ -184,6 +185,7 @@ startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address
 | `VITE_NAKAMA_PORT` | `443` |
 | `VITE_NAKAMA_SSL` | `true` |
 
+**PWA:** App is installable on mobile via browser "Add to Home Screen" — manifest, service worker, and install prompt included.
 **Redeploy:** Push to `main` — Cloudflare Pages auto-deploys on every commit.
 
 ---
