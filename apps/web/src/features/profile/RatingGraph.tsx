@@ -59,9 +59,31 @@ export default function RatingGraph({
   const ANIM_MS = 900;
 
   // Canvas layout (logical px — we scale by devicePixelRatio)
-  const W = 340;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [W, setW] = useState(320);
   const H = 180;
   const PAD = { top: 16, right: 20, bottom: 28, left: 42 };
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[0].contentRect.width;
+      if (width > 0) setW(Math.floor(width));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
+  }, [W]); // add W as dependency
 
   //  Data prep
   const allRatings = [
@@ -112,11 +134,10 @@ export default function RatingGraph({
       const ctx = canvas.getContext("2d")!;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      const bgColor = isDark ? "#161614" : "#f5f2ed";
-      const gridColor = isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)";
-      const axisColor = isDark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)";
-      const textColor = isDark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)";
+      const bgColor = "#161614";
+      const gridColor = "rgba(255,255,255,0.05)";
+      const axisColor = "rgba(255,255,255,0.18)";
+      const textColor = "rgba(255,255,255,0.35)";
       const lineColor = "#ff5540";
 
       ctx.clearRect(0, 0, W, H);
@@ -166,9 +187,7 @@ export default function RatingGraph({
       if (series.length < 2) {
         const y = toY(startRating);
         ctx.save();
-        ctx.strokeStyle = isDark
-          ? "rgba(255,85,64,0.25)"
-          : "rgba(255,85,64,0.2)";
+        ctx.strokeStyle = "rgba(255,85,64,0.25)";
         ctx.lineWidth = 1.5;
         ctx.setLineDash([4, 6]);
         ctx.beginPath();
@@ -200,9 +219,7 @@ export default function RatingGraph({
       // Provisional zone shading (first N games)
       if (provisionalGames > 0) {
         const provX = toX(Math.min(provisionalGames, totalGames));
-        ctx.fillStyle = isDark
-          ? "rgba(255,85,64,0.04)"
-          : "rgba(255,85,64,0.03)";
+        ctx.fillStyle = "rgba(255,85,64,0.04)";
         ctx.fillRect(
           PAD.left,
           PAD.top,
@@ -210,9 +227,7 @@ export default function RatingGraph({
           H - PAD.top - PAD.bottom,
         );
         if (prog > 0.1 && provX < W - PAD.right) {
-          ctx.fillStyle = isDark
-            ? "rgba(255,85,64,0.3)"
-            : "rgba(255,85,64,0.25)";
+          ctx.fillStyle = "rgba(255,85,64,0.3)";
           ctx.font = "700 7px system-ui,sans-serif";
           ctx.textAlign = "left";
           ctx.fillText("PROVISIONAL", PAD.left + 3, PAD.top + 9);
@@ -246,7 +261,7 @@ export default function RatingGraph({
       ctx.fill();
 
       // Main line
-      const FADE_START_INDEX = Math.max(0, visible.length - 20);
+      // const FADE_START_INDEX = Math.max(0, visible.length - 20);
 
       for (let i = 1; i < visible.length; i++) {
         const curr = visible[i];
@@ -313,7 +328,7 @@ export default function RatingGraph({
         ctx.arc(x, y, dotR, 0, Math.PI * 2);
         ctx.fillStyle = col;
         ctx.fill();
-        ctx.strokeStyle = isDark ? "#161614" : "#f5f2ed";
+        ctx.strokeStyle = "#161614";
         ctx.lineWidth = 1.5;
         ctx.stroke();
       });
@@ -335,7 +350,7 @@ export default function RatingGraph({
             ly + 3,
           );
         }
-        
+
         const last = visible[visible.length - 1];
         const x = toX(last.game);
         const y = toY(last.rating);
@@ -355,7 +370,7 @@ export default function RatingGraph({
         const x = toX(hovered.game);
         const y = toY(hovered.rating);
         ctx.save();
-        ctx.strokeStyle = isDark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.15)";
+        ctx.strokeStyle = "rgba(255,255,255,0.2)";
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 4]);
         ctx.beginPath();
@@ -371,8 +386,7 @@ export default function RatingGraph({
         ctx.arc(x, y, 5, 0, Math.PI * 2);
         ctx.fillStyle = OUTCOME_COLOR[hovered.outcome];
         ctx.fill();
-        ctx.strokeStyle = isDark ? "#161614" : "#f5f2ed";
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#161614";
         ctx.stroke();
       }
 
@@ -490,7 +504,7 @@ export default function RatingGraph({
   }
 
   return (
-    <div style={{ position: "relative" }}>
+    <div ref={containerRef} style={{ position: "relative", width: "100%" }}>
       {/* Header row */}
       <div
         style={{

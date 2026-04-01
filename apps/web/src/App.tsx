@@ -31,15 +31,39 @@ interface MatchState {
 
 const DEBUG_FORCE_OFFLINE = false;
 
+const isIOSStandalone =
+  typeof navigator !== "undefined" &&
+  "standalone" in navigator &&
+  (navigator as Navigator & { standalone: boolean }).standalone === true;
+
 function InstallBanner() {
   const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
   const isAndroid = /android/i.test(navigator.userAgent);
-  const isStandalone = window.matchMedia("(display-mode: standalone)").matches;
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem("xo_install_dismissed") === "1",
   );
+  const [isStandalone, setIsStandalone] = useState(
+    () =>
+      window.matchMedia("(display-mode: standalone)").matches ||
+      isIOSStandalone,
+  );
 
-  if (isStandalone || (!isIOS && !isAndroid) || dismissed) return null;
+  const isLocalhost =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1";
+
+  useEffect(() => {
+    const mq = window.matchMedia("(display-mode: standalone)");
+    const check = () => {
+      setIsStandalone(mq.matches || isIOSStandalone);
+    };
+    check();
+    mq.addEventListener("change", check);
+    return () => mq.removeEventListener("change", check);
+  }, []);
+
+  if (isLocalhost || isStandalone || (!isIOS && !isAndroid) || dismissed)
+    return null;
 
   const dismiss = () => {
     localStorage.setItem("xo_install_dismissed", "1");
@@ -156,8 +180,8 @@ function InstallBanner() {
                   Install as an app — plays fullscreen, no browser chrome.
                 </div>
                 <div>
-                  1. Tap the <span style={{ color: "#8B7CF6" }}>⋮ menu</span> in
-                  Chrome
+                  1. Tap the{" "}
+                  <span style={{ color: "#8B7CF6" }}>⋮ menu</span> in Chrome
                 </div>
                 <div>
                   2. Tap{" "}
