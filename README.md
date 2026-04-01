@@ -6,11 +6,11 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 
 ## Live Deployment
 
-| Service | URL |
-|---|---|
-| **Frontend** | https://xo-xo-nakama.ranasushil026.workers.dev/ |
-| **Nakama Backend** | https://xo-xo-nakama-production.up.railway.app |
-| **Nakama API Port** | 443 (TLS) |
+| Service             | URL                                             |
+| ------------------- | ----------------------------------------------- |
+| **Frontend**        | https://xo-xo-nakama.ranasushil026.workers.dev/ |
+| **Nakama Backend**  | https://xo-xo-nakama-production.up.railway.app  |
+| **Nakama API Port** | 443 (TLS)                                       |
 
 ### Infrastructure
 
@@ -36,6 +36,7 @@ A real-time multiplayer Tic-Tac-Toe game built with a **server-authoritative Nak
 - Local pass-and-play mode
 - Mobile-friendly, tactical UI style
 - Installable as PWA on iOS (Safari) and Android (Chrome) — no app store required
+- Offline-capable via PWA service worker — static assets and local play work without a connection
 
 ---
 
@@ -156,10 +157,10 @@ startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address
 
 **Environment variables set in Railway:**
 
-| Variable | Value |
-|---|---|
-| `DATABASE_URL` | Set automatically by Railway PostgreSQL plugin |
-| `CONSOLE_PASSWORD` | Set in Railway service variables |
+| Variable           | Value                                          |
+| ------------------ | ---------------------------------------------- |
+| `DATABASE_URL`     | Set automatically by Railway PostgreSQL plugin |
+| `CONSOLE_PASSWORD` | Set in Railway service variables               |
 
 **Port exposure:** Nakama API is exposed on port `7350`, mapped to `443` via Railway's generated domain.
 
@@ -171,21 +172,22 @@ startCommand = "/bin/sh -ecx 'until /nakama/nakama migrate up --database.address
 
 **Build settings:**
 
-| Setting | Value |
-|---|---|
-| Root directory | `apps/web` |
-| Build command | `npm run build` |
-| Output directory | `dist` |
+| Setting          | Value           |
+| ---------------- | --------------- |
+| Root directory   | `apps/web`      |
+| Build command    | `npm run build` |
+| Output directory | `dist`          |
 
 **Environment variables set in Cloudflare Pages:**
 
-| Variable | Value |
-|---|---|
+| Variable           | Value                                    |
+| ------------------ | ---------------------------------------- |
 | `VITE_NAKAMA_HOST` | `xo-xo-nakama-production.up.railway.app` |
-| `VITE_NAKAMA_PORT` | `443` |
-| `VITE_NAKAMA_SSL` | `true` |
+| `VITE_NAKAMA_PORT` | `443`                                    |
+| `VITE_NAKAMA_SSL`  | `true`                                   |
 
 **PWA:** App is installable on mobile via browser "Add to Home Screen" — manifest, service worker, and install prompt included.
+**Offline support:** Service worker pre-caches all static assets (SVGs, icons, JS, CSS) on first load. Local pass-and-play mode is fully available offline. Online modes (matchmaking, rooms, leaderboard) are gracefully disabled when no connection is detected.
 **Redeploy:** Push to `main` — Cloudflare Pages auto-deploys on every commit.
 
 ---
@@ -269,12 +271,12 @@ Turn duration is 30 seconds. The server tracks `state.turnStartTime`. On timeout
 
 ### Client → Server (match state opCodes)
 
-| OpCode | Purpose |
-|---|---|
-| `1` | Gameplay payload (`{ index }`) / resync / forfeit |
-| `2` | Knock request |
-| `3` | Host accept/decline knock |
-| `4` | Host close room |
+| OpCode | Purpose                                           |
+| ------ | ------------------------------------------------- |
+| `1`    | Gameplay payload (`{ index }`) / resync / forfeit |
+| `2`    | Knock request                                     |
+| `3`    | Host accept/decline knock                         |
+| `4`    | Host close room                                   |
 
 ### Client → Server (RPC)
 

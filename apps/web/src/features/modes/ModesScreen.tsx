@@ -167,6 +167,52 @@ export default function ModesScreen({
           }}
           className="fade-up-2"
         >
+          {/* LOCAL DUEL — move to top when offline */}
+          {isOffline && (
+            <button
+              className="mode-card"
+              onClick={onLocal}
+              type="button"
+              style={{ minHeight: 116, textAlign: "left", overflow: "hidden" }}
+            >
+              <button
+                className="mode-card"
+                onClick={isOffline ? undefined : onShare}
+                type="button"
+                disabled={isOffline}
+                style={{
+                  minHeight: 116,
+                  textAlign: "left",
+                  overflow: "hidden",
+                  opacity: isOffline ? 0.35 : 1,
+                  cursor: isOffline ? "not-allowed" : "pointer",
+                }}
+              >
+                <div
+                  className="mode-card-bar"
+                  style={{
+                    background:
+                      "linear-gradient(to bottom, var(--amber), var(--amber-dim))",
+                  }}
+                />
+                <span className="mode-card-coord">03 / LOCAL</span>
+                <img
+                  src="/spartan.svg"
+                  aria-hidden
+                  style={cardBgStyle("72%", -6, -10)}
+                />
+                <div style={{ position: "relative", zIndex: 1 }}>
+                  <CardGlyph color="var(--amber)">▸ Local</CardGlyph>
+                  <div className="t-head" style={{ fontSize: 26 }}>
+                    Local Duel
+                  </div>
+                  <p className="t-body" style={{ marginTop: 6 }}>
+                    Pass &amp; play · Same screen · Face to face
+                  </p>
+                </div>
+              </button>
+            </button>
+          )}
           {/* WORLDWIDE — disabled offline */}
           <button
             className="mode-card"
@@ -223,7 +269,9 @@ export default function ModesScreen({
               style={cardBgStyle("58%", -6, -10)}
             />
             <div style={{ position: "relative", zIndex: 1 }}>
-              <CardGlyph color="#8B7CF6">▸ Invite</CardGlyph>
+              <CardGlyph color="#8B7CF6">
+                {isOffline ? "▸ Unavailable" : "▸ Invite"}
+              </CardGlyph>
               <div className="t-head" style={{ fontSize: 26 }}>
                 Create &amp; Share
               </div>
@@ -234,35 +282,44 @@ export default function ModesScreen({
           </button>
 
           {/* LOCAL DUEL — always active */}
-          <button
-            className="mode-card"
-            onClick={onLocal}
-            type="button"
-            style={{ minHeight: 116, textAlign: "left", overflow: "hidden" }}
-          >
-            <div
-              className="mode-card-bar"
+          {!isOffline && (
+            <button
+              className="mode-card"
+              onClick={isOffline ? undefined : onShare}
+              type="button"
+              disabled={isOffline}
               style={{
-                background:
-                  "linear-gradient(to bottom, var(--amber), var(--amber-dim))",
+                minHeight: 116,
+                textAlign: "left",
+                overflow: "hidden",
+                opacity: isOffline ? 0.35 : 1,
+                cursor: isOffline ? "not-allowed" : "pointer",
               }}
-            />
-            <span className="mode-card-coord">03 / LOCAL</span>
-            <img
-              src="/spartan.svg"
-              aria-hidden
-              style={cardBgStyle("72%", -6, -10)}
-            />
-            <div style={{ position: "relative", zIndex: 1 }}>
-              <CardGlyph color="var(--amber)">▸ Local</CardGlyph>
-              <div className="t-head" style={{ fontSize: 26 }}>
-                Local Duel
+            >
+              <div
+                className="mode-card-bar"
+                style={{
+                  background:
+                    "linear-gradient(to bottom, var(--amber), var(--amber-dim))",
+                }}
+              />
+              <span className="mode-card-coord">03 / LOCAL</span>
+              <img
+                src="/spartan.svg"
+                aria-hidden
+                style={cardBgStyle("72%", -6, -10)}
+              />
+              <div style={{ position: "relative", zIndex: 1 }}>
+                <CardGlyph color="var(--amber)">▸ Local</CardGlyph>
+                <div className="t-head" style={{ fontSize: 26 }}>
+                  Local Duel
+                </div>
+                <p className="t-body" style={{ marginTop: 6 }}>
+                  Pass &amp; play · Same screen · Face to face
+                </p>
               </div>
-              <p className="t-body" style={{ marginTop: 6 }}>
-                Pass &amp; play · Same screen · Face to face
-              </p>
-            </div>
-          </button>
+            </button>
+          )}
         </section>
 
         {/* COMING SOON divider */}

@@ -1,5 +1,19 @@
 const CACHE = 'xo-v1';
-const ASSETS = ['/','./index.html'];
+const ASSETS = [
+  '/',
+  '/index.html',
+  '/radar.svg',
+  '/qr-code.svg',
+  '/spartan.svg',
+  '/ai-ckt.svg',
+  '/crown.svg',
+  '/fingerprint.svg',
+  '/icons.svg',
+  '/world-map.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/manifest.webmanifest',
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -20,6 +34,13 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
+    caches.match(e.request).then(cached => {
+      if (cached) return cached;
+      return fetch(e.request).then(res => {
+        const clone = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, clone));
+        return res;
+      }).catch(() => caches.match('/index.html'));
+    })
   );
 });
