@@ -167,19 +167,16 @@ export default function ModesScreen({
           }}
           className="fade-up-2"
         >
-          {/* LOCAL DUEL — move to top when offline */}
+          {/* LOCAL DUEL — top when offline */}
           {isOffline && (
             <button
               className="mode-card"
-              onClick={isOffline ? undefined : onShare}
+              onClick={onLocal}
               type="button"
-              disabled={isOffline}
               style={{
                 minHeight: 116,
                 textAlign: "left",
                 overflow: "hidden",
-                opacity: isOffline ? 0.35 : 1,
-                cursor: isOffline ? "not-allowed" : "pointer",
               }}
             >
               <div
@@ -189,7 +186,7 @@ export default function ModesScreen({
                     "linear-gradient(to bottom, var(--amber), var(--amber-dim))",
                 }}
               />
-              <span className="mode-card-coord">03 / LOCAL</span>
+              <span className="mode-card-coord">01 / LOCAL</span>
               <img
                 src="/spartan.svg"
                 aria-hidden
@@ -243,10 +240,10 @@ export default function ModesScreen({
             </div>
           </button>
 
-          {/* Create & Share — active */}
+          {/* Create & Share —  disable offline */}
           <button
             className="mode-card"
-            onClick={isOffline ? undefined : onMatchmaking}
+            onClick={isOffline ? undefined : onShare}
             type="button"
             disabled={isOffline}
             style={{
@@ -282,19 +279,16 @@ export default function ModesScreen({
             </div>
           </button>
 
-          {/* LOCAL DUEL — always active */}
+          {/* LOCAL DUEL — bottom when online */}
           {!isOffline && (
             <button
               className="mode-card"
-              onClick={isOffline ? undefined : onShare}
+              onClick={onLocal}
               type="button"
-              disabled={isOffline}
               style={{
                 minHeight: 116,
                 textAlign: "left",
                 overflow: "hidden",
-                opacity: isOffline ? 0.35 : 1,
-                cursor: isOffline ? "not-allowed" : "pointer",
               }}
             >
               <div
